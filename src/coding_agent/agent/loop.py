@@ -53,9 +53,11 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
     state = AgentState.initialize(
         task=task,
         workspace=workspace,
-        task_mode=TaskMode.GREENFIELD.value if "greenfield" in task.lower() else TaskMode.EXISTING_REPOSITORY.value,
+        task_mode=TaskMode.EXISTING_REPOSITORY.value,  # 占位，下一行立刻覆盖
     )
     brief = TaskBrief.from_user_task(task)
+    # TaskMode 单源：以 brief 的判定为准
+    state.task_mode = brief.task_mode.value
 
     # 2. 注册组件
     runtime = LocalRuntime(workspace=workspace, config=config)
@@ -152,9 +154,30 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
             if action.tool_name in ("apply_patch", "patch"):
                 if observation.success and action.arguments.get("path"):
                     state.record_modified(action.arguments["path"])
+                    state.add_finding(f"Modified {action.arguments['path']}")
             elif action.tool_name == "read_file":
                 if observation.success and action.arguments.get("path"):
                     state.record_inspected(action.arguments["path"])
+            elif action.tool_name == "search_code":
+                if observation.success:
+                    # 抽取匹配数
+                    import re as _re
+
+                    m = _re.search(r"Found (\d+) matches", observation.content)
+                    if m:
+                        state.add_finding(
+                            f"search_code('{action.arguments.get('query', '')}') → {m.group(1)} matches"
+                        )
+            elif action.tool_name == "run_command":
+                # 命令是测试且失败 → 记录
+                if observation.is_validation_failure:
+                    state.recent_validation = observation.summary or "test failed"
+                    state.add_finding(
+                        f"Test failure: {observation.summary or 'see logs'}"
+                    )
+                    state.add_open_question(
+                        "Why did the test fail? Inspect modified files and recent test output."
+                    )
 
             if observation.is_validation_failure:
                 state.recent_validation = observation.summary
@@ -167,6 +190,9 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                 action.args_hash,
                 observation_changed=observation.success,
             )
+
+            # 记录 step 状态指纹（stagnation 检测用）
+            state.mark_step_done()
 
     finally:
         trajectory.close()

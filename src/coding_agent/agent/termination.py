@@ -80,6 +80,10 @@ class TerminationController:
             if top_count >= cfg.repeated_action_limit:
                 return True, StopReason.REPEATED_ACTION, None
 
+        # 7. Stagnation：连续 N 步状态完全没变
+        if state.is_stagnant(lookback=cfg.stagnation_limit):
+            return True, StopReason.STAGNATION, None
+
         return False, None, None
 
     def get_repeated_action_feedback(self) -> str | None:

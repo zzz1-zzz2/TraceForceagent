@@ -75,9 +75,17 @@ class AgentState:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
 
+    # --- Stagnation 检测 ---
+    _state_signature_history: list[tuple] = field(default_factory=list)
+    """每步的状态指纹，用于 stagnation 检测。内部字段，不导出。"""
+
     @classmethod
     def initialize(cls, task: str, workspace: Path, task_mode: str = "existing_repository") -> "AgentState":
-        """初始化一个 AgentState。"""
+        """初始化一个 AgentState。
+
+        task_mode 由调用方决定（通常来自 TaskBrief.from_user_task 的启发式判定），
+        本方法不再自行推断，避免多处判定不一致。
+        """
         return cls(
             original_task=task,
             workspace=workspace,
@@ -119,12 +127,33 @@ class AgentState:
         return self.total_input_tokens + self.total_output_tokens
 
     def is_stagnant(self, lookback: int = 5) -> bool:
-        """检测 stagnation：最近 N 步没有 inspected_files / modified_files 变化。
+        """检测 stagnation：最近 lookback 步 modified_files / inspected_files /
+        recent_validation 都没有变化。
 
-        注意：这里简化用集合大小变化判断；真实实现可以更精细。
+        内部维护 _state_signature_history，调用本方法前应至少 lookback 步之后。
         """
-        # TODO: 需要 history 跟踪每步状态变化，V1 简化
-        return False  # 默认不触发，termination 里会更精确判断
+        if len(self._state_signature_history) < lookback:
+            return False
+        recent = self._state_signature_history[-lookback:]
+        # 全部相同才算 stagnation（避免误判探索阶段的连续失败）
+        return len(set(recent)) == 1
+
+    def mark_step_done(self) -> None:
+        """每步结束时调用，记录当前状态指纹。"""
+        sig = self._state_signature()
+        self._state_signature_history.append(sig)
+        # 只保留最近 20 个签名
+        if len(self._state_signature_history) > 20:
+            self._state_signature_history = self._state_signature_history[-20:]
+
+    def _state_signature(self) -> tuple:
+        """构造状态指纹。"""
+        return (
+            frozenset(self.modified_files),
+            frozenset(self.inspected_files),
+            self.recent_validation,
+            tuple(self.current_findings[-3:]) if self.current_findings else (),
+        )
 
     def mark_finished(self, summary: str, validation: str = "") -> None:
         """标记为完成（finish tool 调用时）。"""

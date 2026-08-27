@@ -8,19 +8,27 @@
 5. Recent Interaction（P2，可淘汰）
 
 Full Trajectory 由 TrajectoryLogger 单独保存，与 Active Context 解耦。
+
+P0–P3 优先级淘汰：当 token 数接近 context_budget 时，按优先级从低到高裁剪。
 """
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
+
+import tiktoken
 
 from coding_agent.agent.brief import TaskBrief
 from coding_agent.agent.state import AgentState
 from coding_agent.config import AgentConfig
 from coding_agent.context.working_state import WorkingStateBuilder
 from coding_agent.model.types import ToolResult
+
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -63,50 +71,140 @@ Workspace path boundary: You cannot escape the workspace directory."""
         self.config = config
         self.working_state_builder = WorkingStateBuilder()
         self._recent_turns: deque[_RecentTurn] = deque(maxlen=config.recent_turns * 2)
+        # tiktoken encoder (cl100k_base 是 GPT-4/DeepSeek 通用)
+        try:
+            self._enc = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            # fallback：粗略按字符数估算
+            _log.warning("tiktoken cl100k_base 加载失败，使用字符数估算")
+            self._enc = None
+
+    def _count_tokens(self, text: str) -> int:
+        """计算 token 数。tiktoken 不可用时按字符数 /4 估算。"""
+        if self._enc:
+            return len(self._enc.encode(text))
+        return max(1, len(text) // 4)
+
+    def _count_message_tokens(self, msg: dict) -> int:
+        """计算单条 message 的 token（content + role 等开销）。"""
+        text = msg.get("content", "") or ""
+        if msg.get("role") == "tool":
+            # tool 消息还有 tool_call_id
+            text += str(msg.get("tool_call_id", ""))
+        if msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                fn = tc.get("function", {})
+                text += fn.get("name", "") + fn.get("arguments", "")
+        # 消息结构开销约 4 tokens
+        return self._count_tokens(text) + 4
 
     def build(self, state: AgentState, brief: TaskBrief) -> list[dict[str, Any]]:
-        """构造完整 Active Context messages。"""
-        messages: list[dict[str, Any]] = []
+        """构造完整 Active Context messages，按 token 预算裁剪。"""
+        # 1) 构造候选 messages（按优先级标记）
+        candidates: list[tuple[str, dict]] = []  # (priority, message)
 
-        # 1. System Prompt（P0）
-        messages.append({"role": "system", "content": self.SYSTEM_PROMPT})
+        # P0: System Prompt
+        candidates.append(("P0", {"role": "system", "content": self.SYSTEM_PROMPT}))
 
-        # 2. Original Task（P0，永远保留）
-        messages.append({"role": "user", "content": f"# Task\n{state.original_task}"})
+        # P0: Original Task
+        candidates.append(("P0", {"role": "user", "content": f"# Task\n{state.original_task}"}))
 
-        # 3. Task Brief（P1）
-        messages.append({"role": "assistant", "content": brief.to_text()})
+        # P1: Task Brief
+        candidates.append(("P1", {"role": "assistant", "content": brief.to_text()}))
 
-        # 4. Working State（P1，每次都重新生成）
+        # P1: Working State（每次重渲染）
         working_text = self.working_state_builder.render(state)
         if working_text != "(no state yet)":
-            messages.append({"role": "user", "content": working_text})
+            candidates.append(("P1", {"role": "user", "content": working_text}))
 
-        # 5. Recent Interaction（P2/P3，可淘汰）
-        for turn in list(self._recent_turns)[-self.config.recent_turns:]:
-            # Assistant tool call（OpenAI 格式）
-            messages.append({
-                "role": "assistant",
-                "content": turn.assistant_content or "",
-                "tool_calls": [
-                    {
-                        "id": turn.tool_call_id,
-                        "type": "function",
-                        "function": {
-                            "name": turn.tool_call_name,
-                            "arguments": _json_dumps(turn.tool_call_args),
-                        },
-                    }
-                ],
-            })
-            # Tool result
-            messages.append({
-                "role": "tool",
-                "tool_call_id": turn.tool_call_id,
-                "content": turn.tool_result_content,
-            })
+        # P2: Recent Interaction（按添加顺序，前面的较低优先级）
+        recent = list(self._recent_turns)[-self.config.recent_turns:]
+        for idx, turn in enumerate(recent):
+            # 越近的越优先 P2，越远的降为 P3
+            priority = "P2" if idx >= len(recent) - 3 else "P3"
+            candidates.append((
+                priority,
+                {
+                    "role": "assistant",
+                    "content": turn.assistant_content or "",
+                    "tool_calls": [
+                        {
+                            "id": turn.tool_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": turn.tool_call_name,
+                                "arguments": _json_dumps(turn.tool_call_args),
+                            },
+                        }
+                    ],
+                },
+            ))
+            candidates.append((
+                priority,
+                {
+                    "role": "tool",
+                    "tool_call_id": turn.tool_call_id,
+                    "content": turn.tool_result_content,
+                },
+            ))
+
+        # 2) 按 token 预算淘汰
+        messages = self._pack_by_budget(candidates)
 
         return messages
+
+    def _pack_by_budget(
+        self, candidates: list[tuple[str, dict]]
+    ) -> list[dict[str, Any]]:
+        """按优先级打包，超出 budget 时从 P3 → P2 → P1 淘汰。"""
+        budget = self.config.context_budget
+        # 80% 触发阈值：先把所有 P0/P1 都加进去，然后判断
+        total = 0
+        selected: list[dict] = []
+        # 优先放 P0
+        for prio, msg in candidates:
+            if prio == "P0":
+                tok = self._count_message_tokens(msg)
+                total += tok
+                selected.append(msg)
+
+        # 再放 P1
+        for prio, msg in candidates:
+            if prio == "P1":
+                tok = self._count_message_tokens(msg)
+                total += tok
+                selected.append(msg)
+
+        # 80% 触发线以下，全部装入
+        if total < budget * 0.8:
+            for prio, msg in candidates:
+                if prio in ("P2", "P3"):
+                    selected.append(msg)
+            return selected
+
+        # 触发淘汰
+        # 先装 P2，再 P3，到 budget 停止
+        for prio, msg in candidates:
+            if prio == "P2":
+                tok = self._count_message_tokens(msg)
+                if total + tok > budget:
+                    break
+                total += tok
+                selected.append(msg)
+
+        for prio, msg in candidates:
+            if prio == "P3":
+                tok = self._count_message_tokens(msg)
+                if total + tok > budget:
+                    continue  # skip
+                total += tok
+                selected.append(msg)
+
+        _log.info(
+            f"ContextManager: packed {len(selected)}/{len(candidates)} messages, "
+            f"{total}/{budget} tokens"
+        )
+        return selected
 
     def record_observation(
         self,
