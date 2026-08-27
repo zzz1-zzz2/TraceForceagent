@@ -108,21 +108,39 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                 trajectory.record_finish(state, action)
                 break
 
-            # Dispatch tool
-            tool = registry.get(action.tool_name)
-            if tool is None:
-                observation = tool.unknown_tool_observation(action.tool_name)
+            # 1) InvalidAction：解析器已捕获错误，转化为 Observation 让模型下一轮修正
+            if action.is_invalid:
+                observation = ToolResult.fail(
+                    f"[InvalidAction] {action.error_msg}",
+                    is_runtime_error=True,
+                )
                 state.consecutive_errors += 1
             else:
-                try:
-                    observation = tool.execute(action.arguments, runtime)
-                    if observation.success:
-                        state.consecutive_errors = 0
-                    else:
-                        state.consecutive_errors += 1
-                except Exception as e:
-                    observation = tool.exception_observation(e)
+                # 2) ToolAction：dispatch 到 Tool
+                tool = registry.get(action.tool_name)
+                if tool is None:
+                    # 未知 tool 优雅降级，告诉模型有哪些可用 tool
+                    observation = ToolResult.fail(
+                        f"Unknown tool: '{action.tool_name}'. "
+                        f"Available tools: {', '.join(registry.names())}",
+                        is_runtime_error=True,
+                    )
                     state.consecutive_errors += 1
+                else:
+                    try:
+                        observation = tool.execute(action.arguments, runtime)
+                        if observation.success:
+                            state.consecutive_errors = 0
+                        else:
+                            state.consecutive_errors += 1
+                        # timeout 单独计数
+                        if observation.is_timeout:
+                            state.consecutive_timeouts += 1
+                        else:
+                            state.consecutive_timeouts = 0
+                    except Exception as e:
+                        observation = tool.exception_observation(e)
+                        state.consecutive_errors += 1
 
             # 记录 + 更新状态
             trajectory.record_tool_call(state, action, observation)
@@ -130,11 +148,11 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
             state.tool_calls += 1
             state.record_action(action.tool_name, action.args_hash)
 
-            # 派生状态更新
+            # 派生状态更新（InvalidAction 时 action.tool_name 是空字符串，自然 no-op）
             if action.tool_name in ("apply_patch", "patch"):
                 if observation.success and action.arguments.get("path"):
                     state.record_modified(action.arguments["path"])
-            elif action.tool_name in ("read_file",):
+            elif action.tool_name == "read_file":
                 if observation.success and action.arguments.get("path"):
                     state.record_inspected(action.arguments["path"])
 

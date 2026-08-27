@@ -37,8 +37,9 @@ class Tool(ABC):
         """
         errors: list[str] = []
 
-        required = self.schema.get("parameters", {}).get("required", [])
-        properties = self.schema.get("parameters", {}).get("properties", {})
+        # Tool.schema 是 JSON Schema 的 parameters 部分（即包含 type/properties/required）
+        required = self.schema.get("required", [])
+        properties = self.schema.get("properties", {})
 
         for key in required:
             if key not in args:

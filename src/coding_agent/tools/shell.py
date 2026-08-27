@@ -78,11 +78,21 @@ class RunCommandTool(Tool):
             return ToolResult.fail(
                 f"$ {command}\n\nTimeout after {timeout}s",
                 is_runtime_error=True,
+                is_timeout=True,
                 truncated=truncated,
                 is_validation_failure=False,
             )
 
-        if "command not found" in output.lower() or "not found" in result.stderr.lower():
+        # 命令未找到检测：只匹配具体的命令未找到消息，避免误判 pytest 输出
+        not_found_patterns = [
+            "command not found",                    # bash / zsh
+            "is not recognized as",                  # Windows cmd
+            "不是内部或外部命令",                     # Windows cmd (Chinese)
+            "无法识别",                              # Windows PowerShell
+            "no such file or directory",             # 直接执行二进制找不到
+        ]
+        lower_output = output.lower()
+        if any(pat in lower_output for pat in not_found_patterns):
             return ToolResult.fail(
                 f"$ {command}\n\n{output}\n(executable not found)",
                 is_runtime_error=True,
