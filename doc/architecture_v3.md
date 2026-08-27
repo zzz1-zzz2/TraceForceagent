@@ -1,0 +1,596 @@
+# Coding Agent 整体架构设计书 V3.0
+
+> **轻量级通用 Coding Agent**
+>
+> "LLM 负责决定下一步做什么，Agent Core 负责让这个决定在一个受控、可追踪、可恢复的软件工程环境中不断执行，直到任务完成。"
+
+---
+
+## 元信息
+
+| 项 | 值 |
+|---|---|
+| 项目定位 | 从零实现、无 Agent Framework 依赖、支持仓库维护与 Greenfield 开发的 Single-Agent Coding Agent |
+| 目标环境 | Linux / WSL2 · Python 3.11 |
+| 架构范式 | Iterative Reasoning–Action Loop + Native Tool Calling + Local Runtime |
+| 设计原则 | Minimal Core · Explicit State · Controlled Tools · Adaptive Action · Robust Execution · Real Evaluation |
+
+---
+
+## 1. 文档目的与项目背景
+
+本文档是 Coding Agent 项目的总体架构基线，用于统一后续开发、测试、代码审查、演示视频和面试答辩中的技术口径。它不是功能愿望清单，而是约束项目边界、模块职责、数据流、运行时语义和扩展策略的工程设计文档。
+
+项目要求个人独立设计并实现一个编程智能体。智能体通过与大语言模型交互，自主完成软件开发任务，包括阅读代码、搜索仓库、修改文件、创建文件、执行本地命令、运行测试、根据反馈继续迭代以及最终提交任务结果。系统不得依赖 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等现成 Agent Framework；允许使用模型厂商 API Client 和原生 Tool Calling，但上下文管理、工具定义与执行、模型输出解析、循环终止、错误处理等关键逻辑必须自行实现。
+
+**项目的真正目标不是"调用一个会写代码的大模型"，而是自主实现 LLM 与软件开发环境之间的 Agent Control Layer。**
+
+---
+
+## 2. 项目定位与能力边界
+
+系统定位为 Lightweight General-Purpose Coding Agent，同一套 Agent Core 同时覆盖已有仓库维护与从零项目开发两类任务。二者不会实现为两套独立 Agent，而是通过不同的初始 Task State 和行为倾向复用同一 Reasoning–Action Loop。
+
+### 任务模式对照
+
+| 任务模式 | 典型任务 | 高层行为倾向 |
+|---|---|---|
+| Existing Repository | Bug Fix、Feature、Test、Refactor、Build/Config Fix | 理解任务 → 探索仓库 → 定位相关代码 → 修改 → 验证 → 继续/完成 |
+| Greenfield | CLI、REST API、小型后端、数据工具、Library | 理解需求 → 检查环境 → 建立最小可运行结构 → 实现 → 运行/测试 → 迭代 → 完成 |
+
+### 2.1 核心设计目标
+
+- **Complete**：必须形成完整 Agent 闭环，而不是一次 Prompt 生成代码。
+- **Minimal**：只增加能够显著提升完整性、稳定性、可解释性或真实任务能力的复杂度。
+- **Explicit**：重要 Agent 状态显式存在，不把系统状态全部隐藏在 messages[] 中。
+- **Robust**：系统能够处理 Tool 参数错误、命令失败、API 异常、测试失败、无限循环和 Context 过长。
+- **General**：不针对单一语言或 benchmark 硬编码，同一 Core 可以服务多种技术栈。
+- **Explainable**：每个关键模块、接口和策略都能解释为什么存在、解决什么问题以及为何不选其他方案。
+
+### 2.2 明确非目标
+
+- Multi-Agent 协作与多角色流水线
+- 独立 Planner/Coder/Reviewer Agent
+- 长期跨会话向量记忆和向量数据库 RAG
+- 完整 ReCAP 诊断与 repair-state reconstruction
+- IDE 插件、Web UI、远程 Agent Server
+- 云端托管代码执行、模型训练或微调
+- 大规模 SWE-bench Leaderboard 优化
+
+这些能力不是没有价值，而是当前项目不以"功能数量"为目标。新增功能必须先证明它解决了现有架构中的明确问题。
+
+---
+
+## 3. 参考系统与设计取舍
+
+本项目重点参考 mini-SWE-agent、SWE-agent、OpenHands 和 Agentless，但不直接复制任何一个系统。设计方法是提取它们经过实践验证的优点，再根据本项目的规模、考核要求和可解释性目标进行剪裁。
+
+| 参考系统 | 主要吸收 | 明确不照搬 |
+|---|---|---|
+| mini-SWE-agent | 极简 Agent Loop、Agent/Environment 分离、独立命令执行、简单优先 | Shell-only、完整历史直接等于模型上下文 |
+| SWE-agent | Agent-Computer Interface、Typed Tools、工具输出控制、History Processing、显式提交 | 复杂工具 Bundle、完整环境体系 |
+| OpenHands | Separation of Concerns、Runtime 抽象、Context 独立管理、安全与资源边界 | Event Bus、Agent Server、复杂 Runtime 平台 |
+| Agentless | Understand/Localize → Modify → Validate 的软件工程纪律 | 固定 Localization–Repair–Validation 状态机 |
+
+### 3.1 mini-SWE-agent：极简 Core
+
+参考其"控制循环尽可能小"的思想：核心只需要持续执行 Context → Model → Action → Environment → Observation → Context。命令执行采用独立 subprocess，避免 Persistent Shell 带来的隐式状态。
+
+不直接采用 Shell-only，因为本次考核本身要求展示工具定义与执行能力；同时我们希望文件读取、搜索、修改具备更严格的参数与输出边界。
+
+### 3.2 SWE-agent：受控 Agent-Computer Interface
+
+参考其 ACI 思想：模型能力不仅取决于模型本身，也取决于它如何查看文件、搜索代码、编辑文件和接收错误反馈。因此本项目采用少量 Typed Tools，并限制单次文件读取、搜索结果和命令输出的规模。
+
+### 3.3 OpenHands：职责分离与 Runtime Boundary
+
+参考其"Agent 决策、Tool 表达能力、Runtime 执行、Context 管理"相互解耦的工程思想。这样后续可以从 LocalRuntime 切换到 DockerRuntime，而不改变 AgentLoop 与 Tool API。
+
+### 3.4 Agentless：软件工程行为纪律
+
+参考其先理解/定位、再修改、最后验证的任务纪律，但不把这一流程硬编码成状态机。已有仓库任务可以自然呈现 Understand → Explore/Localize → Modify → Validate，而 Greenfield 任务则使用 Minimal Runnable Increment。
+
+---
+
+## 4. 核心架构范式
+
+本项目采用 **Single-Agent Iterative Reasoning–Action Architecture**。它不是严格 Plan-and-Act，也不是固定 Pipeline。每一轮都根据最新环境反馈重新决定下一步动作。
+
+> **Goal Stable, Plan Adaptive** —— 任务目标稳定，执行计划可以随着仓库探索、命令执行和测试反馈动态变化。
+
+```
+User Task
+   ↓
+Task Brief
+   ↓
+AgentState → ContextManager → LLM → ResponseParser → AgentAction
+                                               ↓
+                                      ToolRegistry → Runtime
+                                               ↓
+                                           Observation
+                                               ↓
+                           TrajectoryLogger + State Update
+                                               ↓
+                                     Next LLM Decision
+                                               ↓
+                                  Finish / Protective Stop
+```
+
+### 4.1 为什么不采用严格 Plan-and-Act
+
+Coding Task 的关键事实往往在执行过程中才被发现。初始计划可能假设修改 cache.py，但第一次搜索就发现真正逻辑位于 storage/backend.py。若系统把初始 Plan 写成强制控制流，就会把模型锁定在基于不充分信息的计划里。因此系统允许模型维护简短 Working Plan，但控制流始终以最新 Observation 为准。
+
+### 4.2 Task Brief 不等于 Plan
+
+| 字段 | 含义 |
+|---|---|
+| goal | 最终任务目标 |
+| constraints | 必须遵守的约束 |
+| success_criteria | 什么情况下可以认为任务完成 |
+| unknowns | 当前尚未确认但可能影响执行的问题 |
+| task_mode | existing_repository 或 greenfield |
+
+Task Brief 是稳定任务描述，不规定必须按照 Step 1/2/3 执行，因此既能防止 Agent 迷失，又不会限制自适应探索。
+
+---
+
+## 5. 系统总体模块划分
+
+| 模块 | 职责 | 不负责 |
+|---|---|---|
+| AgentLoop | 初始化、step、action dispatch、状态更新、终止判断 | 具体文件/命令实现、上下文压缩细节 |
+| AgentState | 保存显式控制状态 | 模型推理 |
+| ModelClient | LLM API、tool schema、usage、网络重试 | 工具执行、终止控制 |
+| ResponseParser | 把 Provider Response 归一为 AgentAction | 执行工具 |
+| ContextManager | 构造 Active Context、预算控制 | 保存完整审计日志 |
+| ToolRegistry | 注册 Tool、输出 schema、查找与 dispatch | OS 直接访问 |
+| Runtime | 文件边界、subprocess、timeout、stdout/stderr | 模型决策 |
+| TrajectoryLogger | 完整记录运行事件、最终 diff、metrics | 决定模型下一步看到什么 |
+| FailureRefresh | 验证失败后更新紧凑 Failure Snapshot | 完整 ReCAP 诊断与检索 |
+
+---
+
+## 6. Agent 状态模型
+
+AgentState 是系统控制层的核心数据结构。Conversation 用于模型通信，AgentState 用于程序控制，两者不能混为一谈。
+
+```text
+AgentState
+├── original_task
+├── task_brief
+├── task_mode
+├── status
+├── step_count
+├── working_summary
+├── inspected_files
+├── modified_files
+├── recent_validation
+├── recent_actions
+├── model_calls
+├── tool_calls
+├── consecutive_errors
+├── consecutive_timeouts
+├── start_time
+└── stop_reason
+```
+
+显式 State 使系统可以可靠判断"是否已经修改文件、是否已验证、是否重复动作、错误是否连续发生、是否应该停止"，而这些事情若只依赖 messages[] 会非常脆弱。
+
+---
+
+## 7. AgentLoop 设计
+
+AgentLoop 是控制层，不承载具体 Tool、Shell、Token 或 Git 业务逻辑。每一轮只完成固定的状态转换。
+
+```text
+1. 初始化 Workspace、TaskBrief 和 AgentState
+2. ContextManager 构造当前消息
+3. ModelClient 调用 LLM
+4. ResponseParser 解析 AgentAction
+5. 若 Finish，则进入 Finalize
+6. 若非法 Action，则转化为可恢复 Observation
+7. 若 ToolAction，则由 ToolRegistry + Runtime 执行
+8. TrajectoryLogger 记录 Action/Observation
+9. AgentState 更新
+10. TerminationController 判断是否继续
+```
+
+伪代码：
+
+```python
+state = initialize(task, workspace)
+
+while not termination.should_stop(state):
+    messages = context_manager.build(state)
+    response = model.generate(messages, tool_registry.schemas())
+    action = parser.parse(response)
+
+    if action.is_finish:
+        return finalize(state, action)
+
+    observation = dispatch_or_convert_error(action)
+    trajectory.record(state, action, observation)
+    state.update(action, observation)
+
+return terminate(state)
+```
+
+---
+
+## 8. ModelClient 与模型输出协议
+
+ModelClient 采用 Adapter Pattern，把 Agent Core 与具体模型提供商解耦。统一接口只暴露 messages、tools 和生成结果。
+
+```python
+class ModelClient:
+    def generate(self, messages, tools) -> ModelResponse:
+        ...
+```
+
+- API 配置与认证
+- messages/tool schema 序列化
+- 请求发送与响应获取
+- token usage 记录
+- 网络/限流/超时的有限重试
+
+模型输出优先使用 **Native Tool Calling**。这样能够获得结构化 Tool 名称与参数，避免依赖 Thought/Action Markdown 文本和脆弱正则解析。但 Tool Schema、参数校验、动作归一化、错误反馈与本地执行全部由本项目实现。
+
+### 8.1 ResponseParser
+
+| 内部动作 | 用途 |
+|---|---|
+| ToolAction | 合法工具调用，包含 tool_name、arguments、raw_response、action_id |
+| FinishAction | 显式任务完成，包含 summary、validation、notes |
+| InvalidAction | 模型输出为空、未知工具、参数类型不正确等，可选择恢复 |
+
+Parser 错误不会直接 Crash。例如 `read_file(path=123)` 会转换成"path expects string"的 Observation，让模型下一轮自行修正；只有连续错误超过阈值才触发保护性终止。
+
+---
+
+## 9. Tool System 设计
+
+Tool System 采用 **Tool Definition → ToolRegistry → Runtime Executor** 三层结构。AgentLoop 只理解抽象 ToolAction，不包含大量 `if tool_name == ...` 的业务分支。
+
+```python
+class Tool:
+    name: str
+    description: str
+    schema: dict
+
+    def execute(self, args, runtime) -> ToolResult:
+        ...
+```
+
+| Tool | 核心能力 | 关键控制 |
+|---|---|---|
+| list_files | 查看目录和树结构 | max_depth、max_entries、ignored_dirs |
+| read_file | 读取指定行区间 | 默认单次最多约 200 行 |
+| search_code | 关键词/符号/文本搜索 | ripgrep、glob、max_results |
+| apply_patch | 修改/创建/删除文件 | Workspace 路径校验、changed_files 记录 |
+| run_command | test/build/lint/git/运行程序 | cwd、timeout、stdout/stderr 截断 |
+| git_diff | 查看当前工作区 Patch | 输出长度控制 |
+| finish | 显式提交任务结果 | summary、validation |
+
+采用"少量 Typed Repository Tools + General Shell"的组合。Typed Tools 提供可控语义与输出边界，run_command 保持对 Python、Java、JavaScript、Rust 等生态的通用性。
+
+---
+
+## 10. Runtime 与 Workspace 设计
+
+Runtime 是 Tool 与真实操作系统之间的执行边界。第一阶段实现 LocalRuntime，后续 benchmark 可以增加 DockerRuntime，而 AgentLoop 和 Tool API 不需要变化。
+
+```
+Agent
+  ↓
+Tool
+  ↓
+Runtime API
+  ↓
+Local OS / Docker
+```
+
+### 10.1 Workspace Boundary
+
+启动 Agent 时指定 workspace_root。所有文件 Tool 都必须 resolve/normalize 路径并验证目标仍位于 workspace_root 内，禁止 `../` 路径逃逸。
+
+### 10.2 Shell Execution
+
+每条命令使用独立 `subprocess.run`，设置 `cwd=workspace_root`、`timeout` 和 `capture_output`。系统不维护长期 Persistent Shell，以减少 cd/export/source 等隐式状态污染。若需要子目录或环境变量，应由单次命令显式表达。
+
+### 10.3 Command Failure 与 Tool Error
+
+| 情况 | 语义 | 处理 |
+|---|---|---|
+| pytest exit code = 1 | 命令成功执行，但测试失败 | 正常 Observation，Agent 应继续修复 |
+| command timeout | Runtime/Tool Error | 结构化错误，记录 timeout 计数 |
+| executable not found | Runtime/Tool Error | 结构化反馈给模型 |
+| permission/path failure | Tool Error | 阻止执行并返回明确原因 |
+
+---
+
+## 11. Context Management 架构
+
+Context Management 是本项目的核心设计之一。系统明确区分 **Full Trajectory** 与 **Active Context**：前者用于审计和复现，后者用于当前模型决策。
+
+| 对象 | 保存内容 | 受 Context Budget 影响 | 主要用途 |
+|---|---|---|---|
+| Full Trajectory | 所有模型响应、Tool Call、Observation、错误、validation、token、duration | 否 | 调试、评测、复现、审计 |
+| Active Context | System Prompt、Original Task、Task Brief、Working State、Recent Interaction | 是 | 当前 LLM 决策 |
+
+> **Archive State ≠ Decision State**：值得保存的信息，不一定都值得在下一轮再次发给模型。
+
+### 11.1 Working State
+
+Working State 只保存可验证的工作信息，而不保存模型私有 Chain-of-Thought。建议字段包括 Current Goal、Important Files、Modified Files、Current Findings、Latest Validation、Open Questions。
+
+```text
+Current Goal: Fix cache expiration
+Important Files: src/cache.py, tests/test_cache.py
+Modified: src/cache.py
+Latest Validation: test_expired failed
+Current Findings: Cache.get() returns stale value
+Open Question: expiration timestamp update path not inspected
+```
+
+V1 优先由程序根据 ToolResult 和 State 自动维护 Working State，暂不引入独立 Summary Agent。必要时后续可加入一次轻量 LLM summarization。
+
+### 11.2 Recent Interaction 与 Context Budget
+
+Active Context 保留最近 N 轮完整交互，较旧 turn 移出 Active Context 但仍存在 Trajectory。ContextManager 维护 `max_context_tokens`，当接近预算时按优先级淘汰低价值历史。
+
+| 优先级 | 内容 |
+|---|---|
+| P0 | Original Task、最新 Failure/Validation、当前 Diff |
+| P1 | Task Brief、Working State、最近关键 Tool Result |
+| P2 | Recent Interaction |
+| P3 | 更旧交互 |
+
+---
+
+## 12. 通用任务处理策略
+
+### 12.1 非明确任务：Repository-First Clarification
+
+当用户需求不完全明确时，Agent 优先通过 Repository 自行消除歧义：查看目录、README、测试、配置、现有实现和 Git 状态，而不是立即向用户提问。只有关键歧义无法由仓库信息解决时，Interactive Mode 才允许 ask_user；Benchmark Mode 禁止提问。
+
+### 12.2 Existing Repository
+
+行为倾向为 Understand → Explore → Localize → Modify → Validate → Iterate，但不是硬编码状态机。Agent 可以根据最新 Observation 跳转、回退或重新探索。
+
+### 12.3 Greenfield
+
+空 Workspace 或明确"从零创建"任务采用 **Minimal Runnable Increment**：先建立最小可运行结构并验证，再逐步增加功能和测试。这样避免一次生成大量未经验证的文件，也让 Agent 保持可控的反馈周期。
+
+```
+Requirements
+   ↓
+Environment Inspection
+   ↓
+Minimal Runnable Skeleton
+   ↓
+Run
+   ↓
+Incremental Features
+   ↓
+Tests
+   ↓
+Iterate / Finish
+```
+
+---
+
+## 13. Validation 与轻量 Failure-Aware Context Refresh
+
+Agent 应主动通过仓库原生方式验证修改，例如 pytest、npm test、mvn test、cargo test、build、lint 或手动运行。验证失败属于正常 Observation，不等于 Agent Error。
+
+### 13.1 Failure-Aware Context Refresh
+
+这是项目唯一研究经验驱动的轻量增强模块，必须保证关闭后 Core Agent 仍完整可用。它不实现完整 ReCAP，只解决一个简单问题：**超长测试失败日志不应未经整理地永久堆入 Active Context**。
+
+当明显 validation command 失败时，根据 test output、current diff、modified files 和最近查看文件构造紧凑 Failure Snapshot，并更新 Working State。
+
+```text
+Failed Test: tests/test_cache.py::test_expired
+Error: Expected None, got stale value
+Current Patch: src/cache.py
+Relevant State: Cache.get() modified; Cache.expire() not inspected
+```
+
+明确不进入 V1 的能力包括 Failure clustering、Context-deficiency hypothesis、Preserve/Rehydrate/Suppress/Acquire、Search Contract 等，以防研究特色喧宾夺主。
+
+---
+
+## 14. Trajectory、运行产物与可观测性
+
+每次 Agent Run 必须可审计。Trajectory 使用 JSONL 保存，每个 Event 至少记录 `event_id, step, timestamp, type, model, tool, args, result, duration, tokens, error`。
+
+```text
+runs/
+└── run_x/
+    ├── trajectory.jsonl
+    ├── final.diff
+    ├── summary.json
+    └── metrics.json
+```
+
+CLI 只展示简洁事件，例如 `[Step 4] apply_patch`、`[Test Failed]`、`[Context Refresh]`、`[Finish]`，不展示模型私有 Chain-of-Thought。
+
+---
+
+## 15. Termination 与 Error Handling
+
+### 15.1 Normal Termination
+
+模型必须通过 `finish(summary, validation)` 显式提交，AgentState.status 进入 COMPLETED。Finish 后保存最终 diff、trajectory、summary 和 metrics。
+
+### 15.2 Protective Termination
+
+- max_steps
+- max_model_calls
+- max_wall_time
+- max_consecutive_errors
+- max_consecutive_timeouts
+- repeated_action_limit
+
+### 15.3 Repeated Action Guard
+
+系统保存最近动作的标准化表示。如果相同 Tool + 相同 Arguments + 没有新 Observation 连续出现，先向模型返回"没有获得新信息，请改变策略"的反馈；持续重复超过阈值则安全终止。
+
+### 15.4 Error Taxonomy
+
+| 类别 | 例子 | 处理策略 |
+|---|---|---|
+| ModelError | network、rate limit、API timeout | bounded retry + exponential backoff |
+| ParserError | unknown tool、invalid args、empty response | 转化为 Observation，让模型自行修正 |
+| ToolError | path、permission、内部异常 | 结构化错误反馈 |
+| CommandFailure | 程序自身 exit_code != 0 | 正常 Observation，不计为系统错误 |
+| ControlError | step/time/loop limit | 安全终止并记录 stop_reason |
+
+---
+
+## 16. Security 与配置管理
+
+- Workspace path boundary
+- Command timeout
+- Tool output limit
+- API key 仅来自环境变量或未跟踪 .env
+- 日志与视频不得输出凭据
+
+### 16.1 AgentConfig
+
+```text
+AgentConfig
+├── model / api_base / temperature
+├── max_steps / max_model_calls / max_wall_time
+├── command_timeout / max_tool_output
+├── context_budget / recent_turns
+└── enable_failure_refresh / benchmark_mode
+```
+
+---
+
+## 17. 推荐代码目录与依赖规则
+
+```text
+project/
+├── main.py
+├── README.md / README.txt / requirements.txt / .env.example
+├── src/
+│   ├── agent/       loop.py · state.py · termination.py
+│   ├── model/       client.py · types.py
+│   ├── context/     manager.py · working_state.py
+│   ├── tools/       base.py · registry.py · filesystem.py · search.py · patch.py · shell.py
+│   ├── runtime/     base.py · local.py
+│   ├── parser/      response.py
+│   ├── trajectory/  logger.py
+│   └── recovery/    failure_refresh.py
+├── tests/
+├── examples/
+├── eval/swebench/
+└── runs/
+```
+
+依赖方向应保持 **Agent → Interfaces → Tools/Context/Model → Runtime**。禁止 Runtime 反向依赖 Agent、Tool 直接 import AgentLoop、Context 依赖 CLI 等循环关系。
+
+---
+
+## 18. 测试与评测体系
+
+| 层级 | 目的 | 示例 |
+|---|---|---|
+| Unit Test | 验证确定性模块正确性 | parser、schema、path boundary、truncation、termination、timeout |
+| Integration Test | 验证完整 read→edit→run→finish 闭环 | 临时小仓库 |
+| Greenfield Test | 验证从零开发能力 | Todo CLI / small REST API |
+| Classic GitHub Issue | 验证真实仓库导航与维护 | Django/Flask/Werkzeug/pytest 题目 |
+| SWE-bench Verified | 验证 repository-level repair | 固定 5–10 个实例 |
+
+Benchmark Mode 不创建新的 Agent，只改变 workspace preparation、task source、budget、ask_user 开关和 evaluator，确保评测使用与交互模式相同的 Core。
+
+| 指标 | 说明 |
+|---|---|
+| Resolved | 任务/benchmark 是否通过最终验证 |
+| Steps | Agent loop 总步数 |
+| Model Calls | LLM 调用次数 |
+| Tool Calls | 工具执行次数 |
+| Tokens | 模型 token 使用 |
+| Duration | 总耗时 |
+| Final Diff Size | 最终变更规模 |
+| Stop Reason | 正常完成或保护性终止原因 |
+
+---
+
+## 19. 开发优先级与阶段验收
+
+| 阶段 | 必须完成 | 验收标准 |
+|---|---|---|
+| P0 Core Loop | Model、Parser、Tool、Runtime、AgentLoop、Finish | 能够对小仓库完成读/改/运行/提交闭环 |
+| P1 Robustness | Context、Termination、Error、Trajectory | 不会无限循环；错误可恢复；运行可审计 |
+| P2 General Tasks | Existing Repo + Greenfield | 同一 Core 能修仓库，也能从空目录建小项目 |
+| P3 Feature | Failure-Aware Context Refresh | 关闭后 Core 不受影响；开启后测试失败得到更短 Snapshot |
+| P4 Evaluation | GitHub Issue + SWE-bench | 固定真实任务，自动记录结果与成本 |
+
+### 19.1 Core Agent 完成标准
+
+1. 接受自然语言任务并构造 Task Brief
+2. 自主查看未知仓库
+3. 搜索和读取代码
+4. 创建/修改/删除文件
+5. 运行 Shell 与仓库测试
+6. 根据失败结果继续工作
+7. 处理非法 Tool Call
+8. 处理 Runtime Error
+9. 限制无限循环与超时
+10. 控制 Active Context
+11. 保存完整 Trajectory
+12. 显式 Finish
+13. 输出最终 Git Diff
+14. 从空目录构建可运行小项目
+15. 在已有仓库中完成至少一个真实修改任务
+
+---
+
+## 20. 关键架构取舍总结
+
+| 选择 | 没有选择 | 核心原因 |
+|---|---|---|
+| Single Agent | Multi-Agent | 先证明最小完整 Coding Agent 闭环，避免额外角色通信与状态同步 |
+| Iterative Reasoning–Action | Strict Plan-and-Act | 软件开发信息动态产生，执行计划必须可适应最新 Observation |
+| Native Tool Calling | Thought/Action 文本协议 | 结构化稳定，减少脆弱 Markdown/Regex 解析 |
+| Typed Tools + Shell | Shell-only / 大量生态专用 Tool | 兼顾可控性与跨语言通用性 |
+| Explicit AgentState | Messages-only | 控制逻辑不应依赖模型历史文本隐式推断 |
+| Trajectory + Active Context | Full History Only | 完整审计与高质量当前决策分别优化 |
+| LocalRuntime 可替换 | Cloud-hosted execution | 满足自行执行要求，并便于未来切换 Docker |
+| Lightweight Failure Refresh | Full ReCAP | 保留研究经验，但不让恢复模块压过 Coding Agent Core |
+
+---
+
+## 21. 项目最终定位与核心叙事
+
+本项目不宣称发明新的 Agent 理论，而是用成熟的软件工程原则，从零实现一个职责清晰、状态显式、工具受控、运行健壮、能够完成真实编程任务的轻量 Coding Agent。
+
+成熟系统给我们的启发可以概括为：
+- mini-SWE-agent 证明 Core 可以足够简单
+- SWE-agent 说明 Agent-Computer Interface 值得认真设计
+- OpenHands 说明 reasoning、context、tool 与 runtime 应该职责分离
+- Agentless 说明真实软件工程任务需要先理解/定位，再修改并验证
+
+最终系统没有照搬其中任何一个，而是根据本次考核目标做了明确取舍。
+
+> **Minimal Single-Agent Core + Explicit State + Controlled Tool Interface + Adaptive Context + Robust Local Runtime + Real Repository Evaluation**
+
+核心一句话定义：
+
+> LLM 负责决定下一步做什么，Agent Core 负责让这个决定在一个受控、可追踪、可恢复的软件工程环境中不断执行，直到任务完成。
+
+---
+
+## 附录 A：参考系统与阅读重点
+
+| 系统 | 阅读重点 |
+|---|---|
+| mini-SWE-agent | Agent loop、environment/model separation、命令执行与极简设计哲学 |
+| SWE-agent | ACI、tools、history processor、submit/termination、error feedback |
+| OpenHands | reasoning-action loop、context/condenser、runtime abstraction、security boundary |
+| Agentless | Localization–Repair–Validation 及其软件工程任务组织方式 |
+
+> 本项目只参考公开系统的架构思想与工程经验，不依赖其 Agent Framework 或 SDK 运行。

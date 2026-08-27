@@ -1,0 +1,38 @@
+/* Coding Agent TUI 样式 */
+
+Screen {
+    background: $surface;
+}
+
+#status {
+    height: 1;
+    background: $primary;
+    color: $text;
+    padding: 0 1;
+}
+
+#left {
+    width: 70%;
+    border: solid $primary;
+}
+
+#right {
+    width: 30%;
+    border: solid $secondary;
+}
+
+.sidebar-title {
+    background: $secondary;
+    color: $text;
+    text-align: center;
+    text-style: bold;
+}
+
+#output, #plan_log {
+    height: 1fr;
+}
+
+#input {
+    height: 3;
+    border: solid $accent;
+}

@@ -1,0 +1,117 @@
+"""TrajectoryLogger：把 Agent 事件写入 JSONL。
+
+每次 Run 输出到 runs/run_<id>/trajectory.jsonl。
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+class TrajectoryLogger:
+    """Agent 事件审计日志。
+
+    每个 event 至少包含：
+    - event_id, step, timestamp, type
+    - 额外字段按 type 不同而不同
+    """
+
+    def __init__(self, run_id: str, workspace: Path):
+        self.run_id = run_id
+        self.workspace = workspace
+        self.run_dir = workspace / "runs" / run_id
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.path = self.run_dir / "trajectory.jsonl"
+        self._file = self.path.open("a", encoding="utf-8")
+        self._counter = 0
+
+    def _write(self, event: dict[str, Any]) -> None:
+        self._counter += 1
+        event["event_id"] = self._counter
+        event["timestamp"] = datetime.utcnow().isoformat()
+        self._file.write(json.dumps(event, ensure_ascii=False, default=str))
+        self._file.write("\n")
+        self._file.flush()
+
+    # ----- 各种事件类型 -----
+
+    def record_model_call(self, state, response) -> None:
+        """记录一次 LLM 调用。"""
+        self._write({
+            "run_id": self.run_id,
+            "step": state.step_count,
+            "type": "model_call",
+            "model": getattr(response, "raw", {}).model if hasattr(response, "raw") and response.raw else "unknown",
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+            "tool_calls_count": len(response.tool_calls),
+        })
+
+    def record_tool_call(self, state, action, observation) -> None:
+        """记录一次 tool call 与 observation。"""
+        self._write({
+            "run_id": self.run_id,
+            "step": state.step_count,
+            "type": "tool_call",
+            "tool": action.tool_name,
+            "action_id": action.action_id,
+            "args": action.arguments,
+            "args_hash": action.args_hash,
+            "result_success": observation.success,
+            "result_content": observation.content[:1000],  # 截断避免巨大
+            "result_summary": observation.summary,
+            "is_validation_failure": observation.is_validation_failure,
+            "is_runtime_error": observation.is_runtime_error,
+        })
+
+    def record_finish(self, state, action) -> None:
+        """记录 finish。"""
+        self._write({
+            "run_id": self.run_id,
+            "step": state.step_count,
+            "type": "finish",
+            "summary": action.summary,
+            "validation": action.validation,
+            "notes": action.notes,
+            "total_steps": state.step_count,
+            "total_tokens": state.total_tokens(),
+            "modified_files": sorted(state.modified_files),
+        })
+
+    def record_stop(self, state, reason: str) -> None:
+        """记录保护性终止。"""
+        self._write({
+            "run_id": self.run_id,
+            "step": state.step_count,
+            "type": "stop",
+            "reason": reason,
+            "total_steps": state.step_count,
+            "total_tokens": state.total_tokens(),
+            "modified_files": sorted(state.modified_files),
+            "status": state.status,
+        })
+
+    def record_error(self, state, error: Exception) -> None:
+        """记录错误。"""
+        self._write({
+            "run_id": self.run_id,
+            "step": state.step_count,
+            "type": "error",
+            "error_type": type(error).__name__,
+            "error_msg": str(error),
+        })
+
+    def close(self) -> None:
+        """关闭文件。"""
+        try:
+            self._file.close()
+        except Exception:
+            pass
+
+    def __del__(self) -> None:
+        self.close()

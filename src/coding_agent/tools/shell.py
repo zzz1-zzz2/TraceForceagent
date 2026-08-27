@@ -1,0 +1,105 @@
+"""run_command 工具：执行 shell 命令。"""
+
+from __future__ import annotations
+
+from coding_agent.model.types import ToolResult
+from coding_agent.runtime.base import Runtime
+from coding_agent.tools.base import Tool
+
+
+class RunCommandTool(Tool):
+    """执行 shell 命令（独立 subprocess，无 persistent shell）。"""
+
+    name = "run_command"
+    description = (
+        "Execute a shell command. Each command runs in an independent subprocess "
+        "(no persistent shell state). Use 'cwd' to change directory within command "
+        "(e.g. 'cd src && python test.py')."
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "Shell command to execute",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Working directory (relative to workspace). Default '.'.",
+                "default": ".",
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Timeout in seconds (default 60, max 600)",
+                "default": 60,
+            },
+        },
+        "required": ["command"],
+    }
+
+    def execute(self, args: dict, runtime: Runtime) -> ToolResult:
+        command = args.get("command", "")
+        if not command:
+            return ToolResult.fail("Missing required parameter: command")
+
+        cwd = args.get("cwd", ".")
+        timeout = min(args.get("timeout", 60), 600)
+
+        # resolve cwd
+        try:
+            workspace = runtime.workspace.resolve()
+            target_cwd = (workspace / cwd).resolve()
+            target_cwd.relative_to(workspace)
+        except (ValueError, Exception):
+            return ToolResult.fail("cwd escapes workspace boundary", is_runtime_error=True)
+
+        try:
+            result = runtime.execute(command=command, cwd=target_cwd, timeout=timeout)
+        except Exception as e:
+            return self.exception_observation(e)
+
+        # 构造 Observation
+        output = result.combined_output
+        truncated = result.truncated
+
+        # 检测是否是测试失败
+        is_validation = self._looks_like_test_command(command) and result.exit_code != 0
+
+        if result.exit_code == 0:
+            return ToolResult.ok(
+                f"$ {command}\n\n{output}",
+                truncated=truncated,
+                summary=f"Command OK ({result.duration:.1f}s)",
+            )
+
+        # exit != 0
+        # 区分 command failure（程序自身失败）和 tool error（runtime error）
+        if result.exit_code == -1:  # timeout
+            return ToolResult.fail(
+                f"$ {command}\n\nTimeout after {timeout}s",
+                is_runtime_error=True,
+                truncated=truncated,
+                is_validation_failure=False,
+            )
+
+        if "command not found" in output.lower() or "not found" in result.stderr.lower():
+            return ToolResult.fail(
+                f"$ {command}\n\n{output}\n(executable not found)",
+                is_runtime_error=True,
+            )
+
+        # 普通程序失败（exit != 0 但命令成功执行）—— 视为 validation failure
+        return ToolResult.fail(
+            f"$ {command}\n\nexit_code={result.exit_code}\n\n{output}",
+            truncated=truncated,
+            is_validation_failure=is_validation,
+            summary=f"Command failed (exit={result.exit_code})",
+        )
+
+    def _looks_like_test_command(self, command: str) -> bool:
+        """判断是否是测试命令。"""
+        lowered = command.lower()
+        return any(
+            kw in lowered
+            for kw in ["pytest", "unittest", "test ", "tests/", "nosetests", "python -m pytest"]
+        )

@@ -1,0 +1,214 @@
+Coding Agent 经典 GitHub Issue 与评测方案 V1.0
+— 配套《Coding Agent 项目架构设计书 V1.0》的测试与成果展示基线 —
+文档目标：为项目开发阶段、真实开源仓库验证、SWE-bench 小规模评测和最终视频演示建立统一测试路线。核心原则是：先证明 Agent Core 完整可靠，再用经典 GitHub Issue 验证真实软件工程能力，最后以固定 SWE-bench 子集提供可量化结果。
+
+1. 总体测试思路
+本项目不应从一开始就直接在大型 SWE-bench 任务上调试。大型仓库同时包含环境、依赖、测试基础设施与任务本身的复杂性，一旦失败，很难判断问题来自 Agent Core 还是外部环境。因此采用“由可控到真实、由功能验收到标准评测”的四层测试体系。
+层级
+测试对象
+主要目的
+是否用于最终展示
+L0
+单元/集成测试
+验证 parser、tools、runtime、context、termination 等内部机制
+否
+L1
+自建小型测试仓库
+验证完整 Agent Loop 是否稳定
+可作为保底
+L2
+经典 GitHub Issue
+验证真实仓库探索、修改与测试闭环
+强烈建议
+L3
+SWE-bench Verified 固定子集
+提供标准化、可量化的 repository-level 结果
+建议报告
+2. 工作环境基线
+主开发环境建议固定为 Linux 语义，避免在原生 Windows 下处理 Shell、路径、子进程与开源项目测试时出现额外差异。
+宿主环境：Windows + WSL2 Ubuntu 22.04/24.04。
+Python：3.11；依赖管理优先 venv 或 uv。
+基础工具：Git、ripgrep（rg）、pytest、常用构建工具。
+Agent Runtime：本地 workspace + 独立 subprocess；每条命令设置 cwd、timeout 与输出上限。
+SWE-bench 评测阶段：使用 Docker 官方 harness，避免污染 Core Agent 的本地开发流程。
+版本控制：题目发布后新建公开 GitHub 仓库，保留真实提交历史；API Key 仅通过环境变量或未入库配置提供。
+3. 为什么需要“经典 GitHub Issue”这一层
+Toy Task 可以证明 Agent 会调用工具，但不能充分证明它具有真实软件工程能力。经典 GitHub Issue 具有自然语言需求、真实仓库结构、既有测试规范和历史修复过程，更适合验证 Agent 是否能自主完成“理解需求 → 探索代码 → 定位 → 修改 → 验证”的闭环。
+这一层的目标不是追求高难度，而是选取修改范围适中、依赖可控、能体现 repository navigation 的真实任务。最终视频中，经典 Issue 往往比“写一个计算器”更能让评委快速感受到 Agent 的工程能力。
+4. GitHub Issue 选择标准
+每个候选 Issue 建议按下面 8 个维度评分。优先选择总分高、环境风险低的任务。
+维度
+理想特征
+说明
+自然语言完整性
+Issue 描述明确但不直接给出修改位置
+能测试任务理解与自主定位
+仓库探索需求
+需要搜索 1–3 个相关文件/符号
+避免退化成单文件函数题
+修改规模
+通常 ≤ 3 个文件，patch 小到中等
+适合数分钟内完成
+测试可用性
+存在 targeted tests 或易于补 regression test
+形成闭环
+环境复杂度
+不依赖数据库、浏览器、外部服务
+减少非 Agent 因素
+测试耗时
+目标测试数秒到 1–2 分钟
+便于重复调试和录视频
+失败可解释性
+失败输出能指向代码语义或接口问题
+便于展示 Agent 继续修复
+可固定基线
+能定位到修复前 commit
+保证任务真实可重放
+重要：经典 Issue 通常已经在当前 main 分支中被修复。不能直接 clone 最新仓库然后让 Agent “修复”它。必须固定到修复前的 base commit，或使用能够还原历史实例的 benchmark/harness。否则任务已经不存在，无法形成有效评测。
+
+5. 推荐候选一：Django make_toast 教学 Ticket
+定位：Core Agent 标准验收题。注意它不是历史真实 GitHub Issue，而是 Django 官方贡献教程设计的“fake accepted ticket”。
+任务核心：为 django.shortcuts 增加 make_toast()，补充相应测试，并运行 shortcuts 测试。Django 官方教程明确展示了“先写测试 → 观察失败 → 实现功能 → 再验证”的完整贡献流程。
+适合测试的能力：
+理解自然语言功能需求；
+自主定位 django/shortcuts.py 与 tests/shortcuts/；
+创建测试文件、修改实现文件；
+执行项目原生测试命令；
+检查最终 diff 并显式 finish。
+推荐用途：开发中期固定回归题。每次修改 Tool、Context、Parser、Runtime 后，都可以重新跑它验证 Agent Core 是否被破坏。
+参考：https://github.com/django/django/blob/main/docs/intro/contributing.txt
+6. 推荐候选二：Werkzeug #1051
+Issue：Headers.__delitem__ signature incompatible with ImmutableHeadersMixin.__delitem__。这是一个真实且已关闭的 good first issue，核心涉及继承层次中的方法签名兼容性。
+它适合展示的不是复杂算法，而是“跨定义导航 + 软件接口理解”。Agent 需要发现 Headers、ImmutableHeadersMixin、EnvironHeaders 之间的继承关系，而不是只在报错字符串附近盲改。
+理想 Agent 行为路径：
+阅读 Issue，识别关键符号 __delitem__；
+search_code 定位多个类的定义；
+read_file 理解继承关系与签名差异；
+查看相关 tests / typing 约束；
+应用最小修改；
+运行 targeted test 或对应检查；
+检查 git diff 后完成。
+推荐用途：真实开源仓库导航能力测试，难度中等，适合在 Core Agent 稳定后尝试。
+参考：https://github.com/pallets/werkzeug/issues/1051
+7. 推荐候选三：Flask #2255
+Issue：Generating relative url with app context should not require SERVER_NAME。该 Issue 描述了一个真实 Flask URL 生成问题：仅有 app context、且显式请求相对 URL 时，不应因为未设置 SERVER_NAME 而失败。该任务历史上被标记为 good first issue。
+这是目前最适合作为“最终视频候选”的经典 Issue 之一，因为它同时具备真实语义、repository exploration、测试场景与有限修改范围。
+理想 Agent 行为路径：
+从 Issue 中提取 url_for、app context、SERVER_NAME、_external=False 等关键词；
+搜索 url_for 实现与 URL adapter 创建逻辑；
+搜索现有 URL building / testing 相关测试；
+理解相对 URL 与外部 URL 的语义差异；
+补充或修改 regression test；
+应用最小 patch；
+运行 targeted tests；若失败则整理 Failure Snapshot 后继续修正；
+测试通过后检查 diff 并 finish。
+推荐用途：正式视频与面试演示的首选候选之一。它能自然展示 search/read/edit/test/continue 的完整闭环，也能在测试失败时体现轻量 Failure-Aware Context Refresh。
+参考：https://github.com/pallets/flask/issues/2255
+8. pytest 作为“测试开发规范”参考
+pytest 本身适合后期挑战，但不建议作为第一个真实仓库。其贡献指南强调：针对 bug，应该编写能复现问题的 regression test；对于 pytest 本体，经常通过 pytester fixture 做黑盒式测试。
+我们可以借鉴的是测试思维，而不是必须挑 pytest 仓库的某一个当前 Issue：
+Bug Fix 任务优先寻找或补充 regression test；
+测试文件应遵循仓库现有组织方式；
+Agent 修改后先跑 targeted tests，再考虑更大范围验证；
+最终 diff 中应该同时能解释实现变化和测试变化。
+参考：https://github.com/pytest-dev/pytest/blob/main/CONTRIBUTING.rst
+9. 如何重放一个已经修复的经典 Issue
+这是经典 Issue 测试中最关键的工程问题。由于 Flask #2255、Werkzeug #1051 等任务早已被上游修复，必须构造“修复发生前”的环境。推荐按以下方式处理：
+找到对应 Issue 的修复 PR 或修复 commit；
+记录 fix commit 的 parent commit，作为 task base commit；
+clone 仓库后 checkout 到该 base commit；
+创建独立测试分支，但不要预先应用官方 patch；
+保存 Issue 原始描述作为 Agent 输入；
+安装该历史版本所需依赖；
+先人工确认原始问题能够复现；
+记录官方修复后的 targeted test 作为 evaluator，但不要把官方 patch 暴露给 Agent。
+如果历史依赖已经难以安装，优先换 Issue，而不是为了一个展示任务投入大量环境修复时间。我们的目标是测试 Agent，不是考古旧 Python 生态。
+10. 自建标准测试仓库
+在真实 GitHub Issue 之前，应保留一个完全可控的小仓库用于日常回归。建议包含 src/ 与 tests/，准备 4 类固定任务。
+任务
+示例
+主要验证能力
+A 明确 Bug Fix
+divide(a,b) 对 b=0 行为错误
+定位、修改、pytest
+B Feature + Test
+为 Cache 增加 clear()
+跨文件、测试补充
+C 模糊需求
+改善配置加载逻辑，使缺失可选项时更友好
+自主探索、Task Brief
+D 回归型修复
+第一次直觉修复会触发另一个 test failure
+Validation → Context Refresh → Retry
+11. SWE-bench 小规模评测方案
+最终成果展示应加入标准 benchmark，但目标不是追求 leaderboard，而是证明 Agent 能处理真实 repository-level software engineering tasks。SWE-bench 官方 harness 会把生成的 patch 应用于真实仓库并在 Docker 中运行测试，以保证评测环境一致。
+推荐两步走：
+先用 SWE-bench Lite / 单个 gold patch 验证 Docker harness 是否配置正确。
+Core Agent 稳定后，固定 5–10 个 SWE-bench Verified 实例进行最终小规模评测。
+固定 subset 后记录：instance_id、base repository、model、max_steps、token budget、tool budget、resolved/unresolved、model calls、tool calls、tokens、duration。不得只报告成功实例。
+视频可以只展示其中一个轨迹漂亮的成功案例，但 README / 面试中应能说明固定子集的整体结果。
+官方参考：https://github.com/SWE-bench/SWE-bench/blob/main/docs/guides/evaluation.md
+12. 最终测试顺序（项目基线）
+阶段 1：完成 Parser / Tool / Runtime / Context / Termination 单元测试。
+阶段 2：在自建小仓库跑通 4 类任务，确保 Agent Core 稳定。
+阶段 3：使用 Django make_toast 作为固定的开源项目验收题。
+阶段 4：尝试 Werkzeug #1051 或同类真实 Issue，验证跨定义导航。
+阶段 5：准备 Flask #2255 或另一个轨迹更漂亮的真实 Issue 作为视频候选。
+阶段 6：固定 5–10 个 SWE-bench Verified 实例，形成最终量化结果。
+13. 最终视频中的任务选择原则
+最终 2 分钟视频不应展示多个 Issue。选择一个真实任务，重点展示 Agent 的完整行为链。理想轨迹是：
+Issue → search_code → read_file → apply_patch → run_tests → （可选：失败）→ Context Refresh → 再探索/修改 → Tests Pass → git_diff → finish。
+如果某个任务一次就修好，也可以使用；但若能够自然出现一次可解释的测试失败，并由 Agent 继续修正，展示效果会更强。失败必须来自真实任务过程，而不是人为制造。
+14. 结果记录与可审计产物
+每个测试任务建议保存以下产物，便于调试、面试解释和后续统计：
+task.json：任务描述、仓库、base commit；
+trajectory.jsonl：完整 Agent 事件；
+final.patch / git diff；
+result.json：resolved、stop_reason、steps、calls、tokens、duration；
+validation.log：最终 targeted test 输出；
+config.json：模型与预算设置。
+15. 当前推荐候选池
+候选
+性质
+难度
+最佳用途
+推荐度
+Django make_toast
+官方教学 fake ticket
+低
+Core Agent 回归验收
+★★★★★
+Werkzeug #1051
+真实 closed issue
+中
+跨类/接口导航
+★★★★☆
+Flask #2255
+真实 closed issue
+中
+正式视频候选
+★★★★★
+pytest 小型 issue
+真实 issue
+中-高
+后期挑战/测试规范
+★★★☆
+SWE-bench Verified 5–10题
+标准 benchmark
+中-高
+最终量化结果
+★★★★★
+16. 最终决策
+项目测试主线：自建小仓库保证可控；Django make_toast 保证 Core Agent 的标准闭环；经典真实 Issue 证明开源仓库导航与修复能力；SWE-bench Verified 小规模固定子集提供可量化证据。不要让 benchmark 反过来决定 Agent 架构，也不要为了某一个旧 Issue 的环境问题消耗过多开发时间。
+
+当前首选组合：
+Core 回归题：Django make_toast；
+真实 Issue：优先 Flask #2255，备用 Werkzeug #1051；
+最终标准评测：SWE-bench Verified 固定 5–10 个任务。
+17. 参考来源
+Django 官方贡献教程：https://github.com/django/django/blob/main/docs/intro/contributing.txt
+Flask Issue #2255：https://github.com/pallets/flask/issues/2255
+Werkzeug Issue #1051：https://github.com/pallets/werkzeug/issues/1051
+pytest CONTRIBUTING：https://github.com/pytest-dev/pytest/blob/main/CONTRIBUTING.rst
+SWE-bench Evaluation Guide：https://github.com/SWE-bench/SWE-bench/blob/main/docs/guides/evaluation.md
+SWE-bench Docker Setup：https://github.com/SWE-bench/SWE-bench/blob/main/docs/guides/docker_setup.md

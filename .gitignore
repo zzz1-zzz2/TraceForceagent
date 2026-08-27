@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Virtual env
+.venv/
+venv/
+env/
+ENV/
+
+# 环境配置（API key）
+.env
+.env.local
+.env.*.local
+
+# 运行产物
+runs/*
+!runs/.gitkeep
+!runs/.gitignore
+
+# 评测结果
+eval/results/*
+!eval/results/.gitkeep
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# 视频和提交物（不进仓库）
+video/raw/
+video/final/
+*.mp4
+*.zip
+
+# 临时文件
+*.tmp
+*.bak
+*.log
+logs/
+
+# 注：*.docx 已保留（按你的决定）
+# *.docx  # 设计文档原始 Word 版本，现纳入仓库
