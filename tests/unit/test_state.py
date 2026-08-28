@@ -116,3 +116,35 @@ class TestReadyToFinish:
         assert len(state.current_findings) == 1
         assert len(state.open_questions) == 1
         assert state.ready_to_finish is False
+
+    def test_passed_updates_recent_validation(self, tmp_path):
+        """P1-6 修复：recent_validation 必须更新成 pass summary。
+
+        Working State 渲染 'Latest Validation: ...',
+        如果 fail 后 pass 不更新,模型看到 stale 'FAIL' 文本和 ready_to_finish
+        hint 自相矛盾。
+        """
+        state = AgentState.initialize(task="x", workspace=tmp_path)
+        state.recent_validation = "FAIL: 1 test failed"
+        state.record_validation(step=2, command="pytest", passed=True, summary="3 passed in 0.5s")
+        assert state.recent_validation == "3 passed in 0.5s"
+
+    def test_working_state_shows_passed_after_failure(self, tmp_path):
+        """端到端验证: fail → pass 后, Working State 不再有 stale 'FAIL'。"""
+        from coding_agent.context.working_state import WorkingStateBuilder
+
+        state = AgentState.initialize(task="x", workspace=tmp_path)
+        builder = WorkingStateBuilder()
+
+        # 第一次 fail
+        state.record_validation(step=1, command="pytest", passed=False,
+                                summary="FAIL: 1 test failed")
+        text_after_fail = builder.render(state)
+        assert "FAIL" in text_after_fail
+
+        # 第二次 pass,更新
+        state.record_validation(step=2, command="pytest", passed=True,
+                                summary="3 passed in 0.5s")
+        text_after_pass = builder.render(state)
+        assert "FAIL" not in text_after_pass
+        assert "3 passed" in text_after_pass

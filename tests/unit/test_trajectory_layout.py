@@ -41,7 +41,12 @@ def _finish_resp(call_id, summary="done"):
 
 
 def _install_model(monkeypatch, responses):
-    """把 ModelClient.generate 替换成返回 responses 队列。"""
+    """把 ModelClient.generate 替换成返回 responses 队列。
+
+    同时 stub out ``ModelClient.from_config`` 以避免在没有 OPENAI_API_KEY
+    的 CI 环境里 init 真 OpenAI client。本测试只关心 layout,不关心
+    真 client 行为。
+    """
     from coding_agent.model.client import ModelClient
 
     queue = list(responses)
@@ -55,6 +60,13 @@ def _install_model(monkeypatch, responses):
         return r
 
     monkeypatch.setattr(ModelClient, "generate", _generate)
+
+    def _from_config(cls, config):
+        instance = cls.__new__(cls)
+        instance._fake = True
+        return instance
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(_from_config))
     return counter
 
 

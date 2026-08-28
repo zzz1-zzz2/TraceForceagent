@@ -159,6 +159,10 @@ class AgentState:
             self.last_validation_command = command
             self.last_validation_passed = passed
             self.last_validation_summary = summary
+            # Working State 会读 recent_validation 渲染"Latest Validation: ..."。
+            # P1-6 修复：pass 时必须更新,否则 stale "FAIL" 文本会和 ready_to_finish
+            # hint 自相矛盾。
+            self.recent_validation = summary
 
             if passed:
                 # 验证通过 → 标记 ready_to_finish,清理 stale 失败痕迹
