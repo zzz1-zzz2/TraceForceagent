@@ -73,6 +73,7 @@ class AgentAction:
     summary: str = ""
     validation: str = ""
     notes: str = ""
+    validation_skipped_reason: str = ""
 
     # InvalidAction 字段
     error_msg: str = ""
@@ -88,11 +89,18 @@ class AgentAction:
 class FinishAction(AgentAction):
     """显式 Finish Action。"""
 
-    def __init__(self, summary: str, validation: str = "", notes: str = ""):
+    def __init__(
+        self,
+        summary: str,
+        validation: str = "",
+        notes: str = "",
+        validation_skipped_reason: str = "",
+    ):
         super().__init__(is_finish=True)
         self.summary = summary
         self.validation = validation
         self.notes = notes
+        self.validation_skipped_reason = validation_skipped_reason
 
 
 @dataclass

@@ -38,7 +38,18 @@ class TestClassifyValidation:
         assert v.is_validation is True
         assert v.passed is True
 
-    def test_ls_is_not_validation(self):
+    def test_py_compile_is_validation_pass(self):
+        obs = ToolResult.ok("", summary="compile OK")
+        v = classify_validation(obs, "python -m py_compile main.py")
+        assert v.is_validation is True
+        assert v.passed is True
+
+    def test_runtime_error_from_build_is_not_pass(self):
+        obs = ToolResult.fail("npm: command not found", is_runtime_error=True)
+        v = classify_validation(obs, "npm run build")
+        assert v.is_validation is False
+        assert v.passed is None
+
         obs = ToolResult.ok("file1\nfile2", summary="ls OK")
         v = classify_validation(obs, "ls -la")
         assert v.is_validation is False
@@ -169,12 +180,41 @@ class TestGreenfieldEscape:
     模型陷入自我审查死循环。
     """
 
-    def test_greenfield_with_mutation_finishes(self):
+    def test_greenfield_with_code_requires_validation(self, tmp_path):
         state = AgentState.initialize(
-            task="帮我写一个骨架", workspace=Path("/tmp"), task_mode="greenfield",
+            task="create a CLI tool", workspace=tmp_path, task_mode="greenfield",
         )
+        (tmp_path / "main.py").write_text("print('ok')\n")
         state.record_mutation(step=1)
         action = FinishAction(summary="done", validation="")
+        policy = FinishPolicy()
+        accepted, fb = policy.check(state, action)
+        assert accepted is False
+        assert "validation" in fb.lower()
+
+    def test_greenfield_static_skip_requires_reason(self, tmp_path):
+        state = AgentState.initialize(
+            task="update documentation only", workspace=tmp_path, task_mode="greenfield",
+        )
+        (tmp_path / "README.md").write_text("docs\n")
+        state.record_mutation(step=1)
+        action = FinishAction(summary="docs", validation="")
+        policy = FinishPolicy()
+        accepted, fb = policy.check(state, action)
+        assert accepted is False
+        assert "validation_skipped_reason" in fb
+
+    def test_greenfield_static_skip_with_reason_finishes(self, tmp_path):
+        state = AgentState.initialize(
+            task="update documentation only", workspace=tmp_path, task_mode="greenfield",
+        )
+        (tmp_path / "README.md").write_text("docs\n")
+        state.record_mutation(step=1)
+        state.record_modified("README.md")
+        action = FinishAction(
+            summary="docs",
+            validation_skipped_reason="Documentation-only change; no executable behavior changed.",
+        )
         policy = FinishPolicy()
         accepted, fb = policy.check(state, action)
         assert accepted is True

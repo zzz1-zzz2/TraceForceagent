@@ -30,6 +30,13 @@ class FinishTool(Tool):
                 "type": "string",
                 "description": "Optional: known limitations or follow-ups",
             },
+            "validation_skipped_reason": {
+                "type": "string",
+                "description": (
+                    "Required only for static/document-only work when no executable "
+                    "validation is applicable; explain why validation was skipped"
+                ),
+            },
         },
         "required": ["summary"],
     }
@@ -39,8 +46,14 @@ class FinishTool(Tool):
         # 实际 finish 逻辑在 AgentLoop.run() 里
         summary = args.get("summary", "")
         validation = args.get("validation", "")
+        validation_skipped_reason = args.get("validation_skipped_reason", "")
 
         return ToolResult.ok(
-            f"Task finished.\nSummary: {summary}\nValidation: {validation}",
+            f"Task finished.\nSummary: {summary}\nValidation: {validation}"
+            + (
+                f"\nValidation skipped: {validation_skipped_reason}"
+                if validation_skipped_reason
+                else ""
+            ),
             summary=f"Finish: {summary[:100]}",
         )

@@ -114,6 +114,7 @@ class TrajectoryLogger:
             "summary": action.summary,
             "validation": action.validation,
             "notes": action.notes,
+            "validation_skipped_reason": action.validation_skipped_reason,
             "total_steps": state.step_count,
             "total_tokens": state.total_tokens(),
             "modified_files": sorted(state.modified_files),

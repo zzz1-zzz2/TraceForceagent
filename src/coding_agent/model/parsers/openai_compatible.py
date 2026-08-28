@@ -68,6 +68,9 @@ class OpenAICompatibleParser:
                     summary=tc.arguments.get("summary", ""),
                     validation=tc.arguments.get("validation", ""),
                     notes=tc.arguments.get("notes", ""),
+                    validation_skipped_reason=tc.arguments.get(
+                        "validation_skipped_reason", ""
+                    ),
                 )
 
             return ToolAction(

@@ -28,9 +28,9 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run unit test suite
-        # P1-8 验收门：所有 unit test 必须保持全绿。
-        # 当前基线：173 passed。
-        # 任何 failure 都视为 P1 Core 回归,不能合入 main。
+        # Original P1 baseline: 173 tests had zero regressions.
+        # P1.1 adds five policy/mode tests; current total: 178 passed.
+        # Any failure is a P1 regression and must fail CI.
         run: |
           python -m pytest tests/ -q --maxfail=1 --tb=short
 
@@ -41,4 +41,4 @@ jobs:
         run: |
           python -m coding_agent --version
           python -m coding_agent run --help
-          python -m coding_agent tui --help || true
+          python -m coding_agent tui --help

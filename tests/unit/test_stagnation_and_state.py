@@ -57,26 +57,36 @@ class TestStagnationTriggersTermination:
 class TestTaskModeConsistency:
     """TaskMode 应来自 TaskBrief，AgentState.initialize 不再自己判定。"""
 
-    def test_greenfield_keywords_yield_greenfield(self):
-        for kw in ["create", "implement", "build", "from scratch", "new"]:
-            brief = TaskBrief.from_user_task(f"Please {kw} a hello.py")
-            assert brief.task_mode == TaskMode.GREENFIELD, f"'{kw}' should be greenfield"
+    def test_strong_creation_intent_in_empty_workspace_yields_greenfield(self, tmp_path):
+        brief = TaskBrief.from_user_task("create a CLI tool from scratch", workspace=tmp_path)
+        assert brief.task_mode == TaskMode.GREENFIELD
 
-    def test_existing_repo_default(self):
-        brief = TaskBrief.from_user_task("Fix the bug in auth.py")
+    def test_generic_coding_verbs_do_not_force_greenfield(self, tmp_path):
+        for task in ["implement auth", "write helper", "build target"]:
+            assert TaskBrief.from_user_task(task, workspace=tmp_path).task_mode == TaskMode.EXISTING_REPOSITORY
+
+    def test_nonempty_workspace_defaults_existing(self, tmp_path):
+        (tmp_path / "README.md").write_text("existing\n")
+        brief = TaskBrief.from_user_task("create a CLI tool from scratch", workspace=tmp_path)
         assert brief.task_mode == TaskMode.EXISTING_REPOSITORY
 
-    def test_brief_task_mode_overrides_state_default(self, tmp_path):
-        """AgentState 初始值会被 brief.task_mode 覆盖（loop 里的行为）。"""
-        state = AgentState.initialize(
-            task="create a CLI tool",
-            workspace=tmp_path,
-            task_mode=TaskMode.EXISTING_REPOSITORY.value,  # 占位
+    def test_explicit_task_mode_overrides_workspace(self, tmp_path):
+        (tmp_path / "README.md").write_text("existing\n")
+        brief = TaskBrief.from_user_task(
+            "fix auth", task_mode=TaskMode.GREENFIELD, workspace=tmp_path,
         )
-        assert state.task_mode == "existing_repository"
+        assert brief.task_mode == TaskMode.GREENFIELD
 
-        brief = TaskBrief.from_user_task("create a CLI tool")
-        # 模拟 loop.py 的覆盖
+    def test_brief_task_mode_overrides_state_default(self, tmp_path):
+        """显式 TaskBrief mode 可覆盖 AgentState 默认值。"""
+        state = AgentState.initialize(
+            task="fix auth",
+            workspace=tmp_path,
+            task_mode=TaskMode.EXISTING_REPOSITORY.value,
+        )
+        brief = TaskBrief.from_user_task(
+            "fix auth", task_mode=TaskMode.GREENFIELD, workspace=tmp_path,
+        )
         state.task_mode = brief.task_mode.value
         assert state.task_mode == "greenfield"
 

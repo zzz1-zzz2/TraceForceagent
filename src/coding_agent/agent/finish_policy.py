@@ -1,28 +1,9 @@
-"""FinishPolicy：校验 FinishAction 是否可被接受。
-
-背景：模型可能过早调用 finish：
-- 没有真正修改任何文件（只是 inspect）
-- 修改了文件但没跑 validation
-- 跑了 validation 但失败（断言、"test failed" 等）
-- 上一次 mutation 之后没再跑过 validation
-
-正确流程：修改 → 跑测试 → 通过 → finish。
-
-本模块暴露两个独立但相关的判断：
-1. `classify_validation(observation, command) -> ValidationVerdict`：
-   从 run_command 的 ToolResult 判断这次是否是 validation run 及结果。
-   通过 RunCommandTool.is_test_command 复用 shell_tool 的判定（单一来源）。
-
-2. `FinishPolicy.check(state, action) -> (accepted, feedback)`：
-   校验当前 AgentState 是否满足"可以 finish"的前提。
-
-FinishPolicy 不终止循环；只是 reject finish action 并把反馈注入 context。
-终止由 TerminationController / max_steps 负责。
-"""
+"""FinishPolicy：校验 FinishAction 是否可被接受。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from coding_agent.agent.state import AgentState
 from coding_agent.model.types import FinishAction, ToolResult
@@ -32,35 +13,42 @@ from coding_agent.model.types import FinishAction, ToolResult
 class ValidationVerdict:
     """对单次 run_command 调用的分类结果。"""
 
-    is_validation: bool  # 是否看起来是 validation
-    passed: bool | None  # 通过/失败/不确定
-    reason: str  # 解释为什么是 / 不是 validation
+    is_validation: bool
+    passed: bool | None
+    reason: str
 
 
-def classify_validation(
-    observation: ToolResult,
-    command: str,
-) -> ValidationVerdict:
+@dataclass(frozen=True)
+class ValidationRequirements:
+    """当前工作区完成任务所能提供的验证能力。"""
+
+    has_test_entrypoint: bool
+    has_executable_check: bool
+    static_only: bool
+    static_task: bool
+    reason: str
+
+    @property
+    def requires_execution(self) -> bool:
+        """代码或测试项目必须执行至少一个可识别的检查。"""
+        return self.has_test_entrypoint or self.has_executable_check
+
+
+def classify_validation(observation: ToolResult, command: str) -> ValidationVerdict:
     """判断一次 run_command 调用是否构成 validation run。
 
-    判定规则（与 RunCommandTool 内部 _looks_like_test_command 保持一致）：
-    - 命令不命中 test 关键字 → 不是 validation
-    - runtime error / timeout → 不是 validation（避免误把 timeout 算 fail）
-    - 命令命中 test 关键字：
-      - exit_code==0 且 not is_validation_failure → passed=True
-      - exit_code != 0 或 is_validation_failure → passed=False
+    RunCommandTool.is_test_command 是命令分类的单一来源；它现在也覆盖
+    build、syntax、type-check、lint 和 smoke/check 命令。
     """
-    # 延迟导入避免循环依赖（tools 包不依赖 agent）
     from coding_agent.tools.shell import RunCommandTool
 
     if not RunCommandTool.is_test_command(command):
         return ValidationVerdict(
             is_validation=False,
             passed=None,
-            reason=f"command '{command[:60]}' is not a test command",
+            reason=f"command '{command[:60]}' is not a validation command",
         )
 
-    # runtime error / timeout → 不是 validation（避免误把 timeout 算 fail）
     if observation.is_runtime_error:
         return ValidationVerdict(
             is_validation=False,
@@ -68,7 +56,6 @@ def classify_validation(
             reason=f"runtime error: {observation.error[:100] if observation.error else 'unknown'}",
         )
 
-    # 命令看起来是 validation → 判定通过 / 失败
     if observation.is_validation_failure or not observation.success:
         return ValidationVerdict(
             is_validation=True,
@@ -82,94 +69,193 @@ def classify_validation(
     )
 
 
+_TEST_MARKERS = {
+    "pytest.ini",
+    "tox.ini",
+    "noxfile.py",
+    "pytest.toml",
+}
+_TEST_DIRS = {"tests", "test", "__tests__"}
+_STATIC_SUFFIXES = {
+    ".adoc", ".css", ".html", ".htm", ".markdown", ".md", ".rst", ".svg", ".txt"
+}
+_CODE_SUFFIXES = {
+    ".c", ".cc", ".cpp", ".go", ".java", ".js", ".jsx", ".mjs", ".py", ".rb",
+    ".rs", ".sh", ".ts", ".tsx", ".vue",
+}
+_IGNORED_DIRS = {
+    "__pycache__", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
+}
+
+
+def _workspace_files(workspace: Path) -> list[Path]:
+    """读取有限的工作区清单；坏链接或权限错误不应阻塞 finish policy。"""
+    if not workspace.exists() or not workspace.is_dir():
+        return []
+    files: list[Path] = []
+    try:
+        for path in workspace.rglob("*"):
+            if any(part in _IGNORED_DIRS for part in path.parts):
+                continue
+            try:
+                if path.is_file():
+                    files.append(path)
+            except OSError:
+                continue
+    except OSError:
+        return []
+    return files
+
+
+def _has_marker(files: list[Path], names: set[str]) -> bool:
+    return any(path.name.lower() in names for path in files)
+
+
+def _contains_text(files: list[Path], needles: tuple[str, ...]) -> bool:
+    for path in files:
+        if path.name not in {"pyproject.toml", "setup.cfg", "package.json", "Makefile"}:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore").lower()
+        except OSError:
+            continue
+        if any(needle in text for needle in needles):
+            return True
+    return False
+
+
+def validation_requirements(state: AgentState) -> ValidationRequirements:
+    """Infer whether the current Greenfield output has an executable check.
+
+    This is intentionally conservative: absence of tests is not evidence that
+    validation can be skipped. A skip is reserved for static/document-only output.
+    """
+    files = _workspace_files(state.workspace)
+    workspace = state.workspace.resolve()
+    names = {path.name.lower() for path in files}
+    dirs = {
+        part.lower()
+        for path in files
+        for part in path.relative_to(workspace).parts[:-1]
+    }
+    has_tests = bool(dirs & _TEST_DIRS) or bool(names & _TEST_MARKERS)
+    has_tests = has_tests or _contains_text(
+        files, ("[tool.pytest", "npm test", "pytest", "tox", "nox")
+    )
+
+    source_files = [path for path in files if path.suffix.lower() in _CODE_SUFFIXES]
+    has_build = bool(
+        names & {"makefile", "dockerfile", "cargo.toml", "go.mod", "pom.xml", "build.gradle"}
+    ) or _contains_text(
+        files,
+        ("npm run build", '"build"', "[tool.ruff", "mypy", "eslint", "tsconfig"),
+    )
+    # Standard-library/compiler checks are available for common source types,
+    # even when a freshly generated project has no test suite yet.
+    has_language_check = any(
+        path.suffix.lower() in {".c", ".cc", ".cpp", ".go", ".java", ".js", ".mjs", ".py", ".rs", ".ts", ".tsx"}
+        for path in source_files
+    )
+    has_check = has_tests or has_build or has_language_check
+
+    modified_suffixes = {
+        Path(path).suffix.lower() for path in state.modified_files if Path(path).suffix
+    }
+    static_only = bool(state.modified_files) and modified_suffixes.issubset(_STATIC_SUFFIXES)
+    if not state.modified_files:
+        static_only = False
+    task_text = state.original_task.lower()
+    static_task = any(
+        phrase in task_text
+        for phrase in ("documentation", "document only", "docs only", "文档", "只改注释", "注释")
+    ) and not any(
+        phrase in task_text
+        for phrase in ("code", "website", "site", "app", "项目", "功能", "实现", "编写")
+    )
+
+    static_only = static_only and static_task
+    if has_tests:
+        reason = "test entry point or test framework detected"
+    elif has_check:
+        reason = "build, syntax, type-check, lint, or smoke validation is available"
+    elif static_only and static_task:
+        reason = "only static/document files were modified and no executable check was found"
+    else:
+        reason = "no recognized executable validation was found"
+    static_only = static_only and static_task
+    return ValidationRequirements(
+        has_test_entrypoint=has_tests,
+        has_executable_check=has_check,
+        static_only=static_only,
+        static_task=static_task,
+        reason=reason,
+    )
+
+
 @dataclass
 class FinishPolicy:
-    """FinishAction 的接受策略。
+    """FinishAction 的接受策略。"""
 
-    默认拒绝条件（按顺序）：
-    1. 从未修改任何文件（last_mutation_step == 0）：
-       "No files were modified. Either the task didn't require code changes,
-        or you skipped the implementation step."
-    2. 修改过文件但从未跑过 validation（last_validation_step == 0）：
-       "You modified files but never ran tests. Run your project's test
-        suite before calling finish."
-    3. 最后一次 mutation 之后没再跑过 validation：
-       "You modified files after the last validation. Re-run tests."
-    4. 最后一次 validation 失败：
-       "Last validation FAILED. Fix the test failures and try again."
-
-    注意：本策略仅适用于代码工程任务。Greenfield 任务（从零创建）也仍然
-    至少需要 validation 才能 finish；这是有意为之的"先跑测试再交付"门。
-    """
-
-    # 如果为 True，跳过 mutation 检查（用于纯文档/注释任务）
     skip_mutation_check: bool = False
 
-    def check(
-        self,
-        state: AgentState,
-        action: FinishAction,
-    ) -> tuple[bool, str | None]:
-        """检查 FinishAction 是否可被接受。
-
-        Returns:
-            (accepted, feedback)
-            - accepted=True: 可以 finish
-            - accepted=False: 拒绝，feedback 是给模型的明确指引
-
-        Greenfield 特例 (P1-6 修复)：
-        - task_mode == "greenfield" 时,跳过 mutation / validation 检查
-        - 仍然要求至少有一次 mutation(防止"什么都没写就 finish")
-        - 原因是 greenfield 项目(个人网站骨架 / CLI 工具骨架)通常没有
-          现有 test suite,FinishPolicy 不应强迫模型伪造 validation
-        """
-        # ---- 0. greenfield escape hatch ----
-        if state.task_mode == "greenfield":
-            if state.last_mutation_step == 0:
-                return False, (
-                    "Greenfield task but no files were created yet. "
-                    "Use apply_patch to create the files first, then call finish."
-                )
-            return True, None
-
-        # ---- 1. mutation check ----
+    def check(self, state: AgentState, action: FinishAction) -> tuple[bool, str | None]:
+        """检查当前 AgentState 是否满足 finish 前提。"""
+        if state.task_mode == "greenfield" and state.last_mutation_step == 0:
+            return False, (
+                "Greenfield task but no files were created yet. Use apply_patch to "
+                "create the files first, then call finish."
+            )
         if not self.skip_mutation_check and state.last_mutation_step == 0:
             return False, (
-                "No files were modified. If the task requires code changes, "
-                "use apply_patch to make them first. If no changes are needed, "
-                "explain why in the summary and call finish again."
+                "No files were modified. If the task requires code changes, use "
+                "apply_patch to make them first. If no changes are needed, explain why "
+                "in the summary and call finish again."
             )
 
-        # ---- 2. validation 存在性 ----
-        if state.last_validation_step == 0:
+        requirements = validation_requirements(state)
+        skip_reason = getattr(action, "validation_skipped_reason", "").strip()
+
+        # Static/document-only work may explicitly document why no command ran.
+        # Merely saying "there are no tests" is intentionally not enough.
+        if requirements.static_only and skip_reason:
+            state.finish_validation_skipped_reason = skip_reason
+            return True, None
+        if requirements.static_only and not skip_reason and state.last_validation_step == 0:
             return False, (
-                "You modified files but never ran the project's test suite. "
-                "Use run_command to execute your project's test command "
-                "(e.g. `pytest`, `npm test`, `cargo test`) before calling finish."
+                "Only static/document files were modified and no executable validation "
+                "was found. Provide a non-empty validation_skipped_reason explaining "
+                "why validation was skipped, or run an applicable check."
             )
 
-        # ---- 3. mutation-after-validation ----
+        if state.last_validation_step == 0:
+            if not requirements.requires_execution:
+                return False, (
+                    "No executable validation was found for this generated project. "
+                    "Do not finish based only on 'no tests'. Run a syntax, build, lint, "
+                    "type-check, or smoke command, or make the work explicitly static "
+                    "and provide validation_skipped_reason."
+                )
+            return False, (
+                "You modified files but never ran an available validation. Use "
+                "run_command to execute the project's tests, build, syntax check, "
+                "type-check, lint, or smoke check before calling finish."
+            )
+
         if state.last_mutation_step > state.last_validation_step:
             return False, (
-                f"You modified files after the last validation (mutation at "
-                f"step {state.last_mutation_step}, last validation at step "
-                f"{state.last_validation_step}). Re-run tests before finishing."
+                f"You modified files after the last validation (mutation at step "
+                f"{state.last_mutation_step}, last validation at step "
+                f"{state.last_validation_step}). Re-run validation before finishing."
             )
 
-        # ---- 4. validation passed ----
         if state.last_validation_passed is False:
             return False, (
-                f"Last validation FAILED. "
-                f"Command: `{state.last_validation_command}`. "
+                f"Last validation FAILED. Command: `{state.last_validation_command}`. "
                 f"Summary: {state.last_validation_summary or '(no summary)'}. "
-                f"Fix the failures and re-run tests."
+                "Fix the failures and re-run validation."
             )
 
         if state.last_validation_passed is None:
-            # validation 存在但 passed 状态未知（不应发生，但兜底）
-            return False, (
-                "Last validation has unknown pass/fail state. Re-run tests."
-            )
+            return False, "Last validation has unknown pass/fail state. Re-run validation."
 
-        # all clear
         return True, None

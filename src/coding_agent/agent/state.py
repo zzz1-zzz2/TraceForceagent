@@ -70,6 +70,7 @@ class AgentState:
     stop_reason: StopReason | None = None
     finish_summary: str | None = None
     finish_validation: str | None = None
+    finish_validation_skipped_reason: str | None = None
 
     # --- Mutation / Validation tracking (P0-2 / P0-3) ---
     # 用于 FinishPolicy 校验：必须"修改 → validation 通过"才能 finish。
@@ -244,11 +245,17 @@ class AgentState:
             tuple(self.current_findings[-3:]) if self.current_findings else (),
         )
 
-    def mark_finished(self, summary: str, validation: str = "") -> None:
+    def mark_finished(
+        self,
+        summary: str,
+        validation: str = "",
+        validation_skipped_reason: str = "",
+    ) -> None:
         """标记为完成（finish tool 调用时）。"""
         self.status = "COMPLETED"
         self.finish_summary = summary
         self.finish_validation = validation
+        self.finish_validation_skipped_reason = validation_skipped_reason or None
         self.stop_reason = StopReason.FINISH
 
     def mark_stopped(self, reason: StopReason) -> None:

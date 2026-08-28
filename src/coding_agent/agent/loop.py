@@ -57,7 +57,7 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
         workspace=workspace,
         task_mode=TaskMode.EXISTING_REPOSITORY.value,  # 占位，下一行立刻覆盖
     )
-    brief = TaskBrief.from_user_task(task)
+    brief = TaskBrief.from_user_task(task, workspace=workspace)
     # TaskMode 单源：以 brief 的判定为准
     state.task_mode = brief.task_mode.value
 
@@ -124,7 +124,11 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                     trajectory.record_feedback(state, fb_text)
                     state.mark_step_done()
                     continue
-                state.mark_finished(action.summary, action.validation)
+                state.mark_finished(
+                    action.summary,
+                    action.validation,
+                    action.validation_skipped_reason,
+                )
                 trajectory.record_finish(state, action)
                 break
 
