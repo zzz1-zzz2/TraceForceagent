@@ -54,6 +54,25 @@ class TestBuild:
         messages = cm.build(state, brief)
         assert messages[0]["role"] == "system"
 
+    def test_ready_to_finish_injects_hint(self, cm, state):
+        """P1-3 修复：state.ready_to_finish=True 时 build() 注入 finish hint。"""
+        state.ready_to_finish = True
+        brief = TaskBrief.from_user_task(state.original_task)
+        messages = cm.build(state, brief)
+        contents = [m.get("content", "") for m in messages if m.get("content")]
+        assert any("finish" in c.lower() and "validation passed" in c.lower()
+                   for c in contents), \
+            f"应当注入 ready_to_finish hint，但 messages: {contents}"
+
+    def test_no_hint_when_ready_to_finish_false(self, cm, state):
+        """ready_to_finish=False 时不注入 finish hint。"""
+        state.ready_to_finish = False
+        brief = TaskBrief.from_user_task(state.original_task)
+        messages = cm.build(state, brief)
+        contents = [m.get("content", "") for m in messages if m.get("content")]
+        assert not any("finish" in c.lower() and "validation passed" in c.lower()
+                       for c in contents)
+
     def test_original_task_included(self, cm, state):
         brief = TaskBrief.from_user_task(state.original_task)
         messages = cm.build(state, brief)

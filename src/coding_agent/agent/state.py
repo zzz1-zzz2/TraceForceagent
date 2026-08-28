@@ -80,6 +80,13 @@ class AgentState:
     last_validation_passed: bool | None = None  # True=pass, False=fail, None=未跑过
     last_validation_summary: str = ""
 
+    # --- ready_to_finish (P1-3 修复) ---
+    # validation 通过且之后没有新 mutation 时为 True。
+    # ContextManager 在 build() 时会注入一行"可以 finish"提示,
+    # 避免模型在测试通过后陷入 self-review 模式。
+    # 任何新 mutation 立刻重置为 False,强制重跑验证。
+    ready_to_finish: bool = False
+
     # --- 用量统计 ---
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -117,8 +124,12 @@ class AgentState:
         """记录最后一次 mutation 发生的 step（FinishPolicy 用）。
 
         仅由 apply_patch 成功时调用。
+
+        P1-3 修复：新 mutation 立刻清 ready_to_finish,
+        强制模型在新修改后再跑一次 validation 才能 finish。
         """
         self.last_mutation_step = max(self.last_mutation_step, step)
+        self.ready_to_finish = False
 
     def record_validation(
         self,
@@ -139,12 +150,44 @@ class AgentState:
         - 只在 step > last_validation_step 时才更新（更早的事件被忽略）。
         - 这是为了在"validation → mutation → validation"序列里，
           第二次 validation（更新 step）覆盖第一次。
+        - P1-3 修复：passed=True 时设 ready_to_finish=True,
+          并清理"上次失败"的 stale findings / open_questions,
+          避免 Working State 出现"tests passed"和"test failed?"矛盾信号。
         """
         if step > self.last_validation_step:
             self.last_validation_step = step
             self.last_validation_command = command
             self.last_validation_passed = passed
             self.last_validation_summary = summary
+
+            if passed:
+                # 验证通过 → 标记 ready_to_finish,清理 stale 失败痕迹
+                self.ready_to_finish = True
+                self._clear_failure_traces()
+            else:
+                # 验证失败 → ready_to_finish 必须 False,
+                # 而且保留 failure traces 帮助模型 debug
+                self.ready_to_finish = False
+
+    def _clear_failure_traces(self) -> None:
+        """清理上一次验证失败留下的 stale findings / open_questions。
+
+        只清除明显的"测试失败"痕迹,保留 inspect / mutation 相关的 findings。
+        这样 Working State 不会出现"tests passed"和"why did test fail"并存的矛盾信号。
+        """
+        failure_keywords = (
+            "test failure", "test failed", "assertion", "exception",
+            "traceback", "error:", "failed:", "why did the test fail",
+            "fix the test",
+        )
+        self.current_findings = [
+            f for f in self.current_findings
+            if not any(kw in f.lower() for kw in failure_keywords)
+        ]
+        self.open_questions = [
+            q for q in self.open_questions
+            if not any(kw in q.lower() for kw in failure_keywords)
+        ]
 
     def record_inspected(self, path: str) -> None:
         """记录读过的文件。"""

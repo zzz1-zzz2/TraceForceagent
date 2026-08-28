@@ -132,6 +132,22 @@ Workspace path boundary: You cannot escape the workspace directory."""
         if working_text != "(no state yet)":
             candidates.append(("P1", {"role": "user", "content": working_text}))
 
+        # P1: ready_to_finish hint (P1-3 修复)
+        # 当最近一次 validation 通过且之后没有新 mutation 时,
+        # 注入一条一次性提示,告诉模型"测试已经通过,可以直接 finish"。
+        # 优先级 P1：不会被预算裁剪掉,模型下一轮决策时一定能看见。
+        if state.ready_to_finish:
+            candidates.append(("P1", {
+                "role": "user",
+                "content": (
+                    "[System Hint] The most recent validation passed. "
+                    "You should call finish(summary, validation) now, "
+                    "with validation describing what passed (e.g. "
+                    "'pytest tests/ - 3 passed'). Do NOT run more read_file "
+                    "or git_diff unless you have made new changes."
+                ),
+            }))
+
         # P2: Recent Interaction（按添加顺序，前面的较低优先级）
         recent = list(self._recent_turns)[-self.config.recent_turns:]
         for idx, turn in enumerate(recent):

@@ -59,3 +59,60 @@ class TestAgentState:
         state.total_input_tokens = 100
         state.total_output_tokens = 50
         assert state.total_tokens() == 150
+
+
+class TestReadyToFinish:
+    """P1-3 修复：validation pass 后应能引导 Agent 调 finish。
+
+    关键不变量：
+    - validation passed=True → ready_to_finish=True + 清理 stale 失败痕迹
+    - 新 mutation → ready_to_finish=False（强制重跑验证）
+    - validation failed → ready_to_finish=False（保留 failure traces）
+    """
+
+    def test_passed_validation_sets_ready(self, tmp_path):
+        state = AgentState.initialize(task="x", workspace=tmp_path)
+        state.record_validation(step=1, command="pytest", passed=True, summary="3 passed")
+        assert state.ready_to_finish is True
+        assert state.last_validation_passed is True
+
+    def test_failed_validation_does_not_set_ready(self, tmp_path):
+        state = AgentState.initialize(task="x", workspace=tmp_path)
+        state.record_validation(step=1, command="pytest", passed=False, summary="1 failed")
+        assert state.ready_to_finish is False
+        assert state.last_validation_passed is False
+
+    def test_mutation_clears_ready(self, tmp_path):
+        state = AgentState.initialize(task="x", workspace=tmp_path)
+        # 先有验证通过
+        state.record_validation(step=1, command="pytest", passed=True)
+        assert state.ready_to_finish is True
+        # 再有 mutation → ready 必须清空
+        state.record_mutation(step=2)
+        assert state.ready_to_finish is False
+
+    def test_passed_clears_failure_traces(self, tmp_path):
+        state = AgentState.initialize(task="x", workspace=tmp_path)
+        # 模拟之前的失败状态
+        state.add_finding("Test failure: assert 1 == 2")
+        state.add_open_question("Why did the test fail?")
+        state.add_finding("Modified src/foo.py")  # 这个不应被清
+        # 验证通过
+        state.record_validation(step=1, command="pytest", passed=True)
+
+        # 失败相关痕迹被清,正常 finding 保留
+        assert not any("test failure" in f.lower() for f in state.current_findings)
+        assert not any("why did" in q.lower() for q in state.open_questions)
+        assert any("modified" in f.lower() for f in state.current_findings)
+
+    def test_failed_keeps_failure_traces(self, tmp_path):
+        state = AgentState.initialize(task="x", workspace=tmp_path)
+        state.add_finding("Test failure: assert 1 == 2")
+        state.add_open_question("Why did the test fail?")
+
+        state.record_validation(step=1, command="pytest", passed=False)
+
+        # 失败痕迹保留
+        assert len(state.current_findings) == 1
+        assert len(state.open_questions) == 1
+        assert state.ready_to_finish is False
