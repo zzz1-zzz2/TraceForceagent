@@ -132,3 +132,5 @@ class TestApplyPatchBoundary:
         )
         assert result.success
         assert (tmp_path / "new.txt").read_text() == "content"
+
+    # 更全面的 create 不覆盖测试见 tests/unit/test_create_no_overwrite.py

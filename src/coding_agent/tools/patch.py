@@ -81,6 +81,21 @@ class ApplyPatchTool(Tool):
             return self._modify(target, path_str, args)
 
     def _create(self, target: Path, workspace: Path, path_str: str, args: dict) -> ToolResult:
+        # P1-1: 拒绝覆盖已存在的文件——避免误删模型已写好的内容。
+        # 模型应改用 modify 模式（旧字符串 → 新字符串）。
+        if target.exists():
+            existing_size = 0
+            try:
+                existing_size = target.stat().st_size
+            except OSError:
+                pass
+            return ToolResult.fail(
+                f"File already exists: {path_str} ({existing_size} bytes). "
+                f"Refusing to overwrite. Use mode='modify' with old_string/"
+                f"new_string to change an existing file, or pick a new path.",
+                is_runtime_error=True,
+            )
+
         content = args.get("new_string") or args.get("content", "")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)

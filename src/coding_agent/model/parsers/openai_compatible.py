@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from coding_agent.model.types import (
     AgentAction,
     FinishAction,
@@ -18,13 +20,16 @@ from coding_agent.model.types import (
     ModelResponse,
     ToolAction,
 )
-from coding_agent.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    # 避免 model ↔ tools 包循环导入
+    from coding_agent.tools.registry import ToolRegistry
 
 
 class OpenAICompatibleParser:
     """把 ModelResponse 解析为 AgentAction。"""
 
-    def __init__(self, registry: ToolRegistry):
+    def __init__(self, registry: "ToolRegistry"):
         self.registry = registry
 
     def parse(self, response: ModelResponse) -> AgentAction:
