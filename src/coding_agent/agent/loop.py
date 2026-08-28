@@ -1,13 +1,9 @@
-"""AgentLoop：核心控制循环（7 步循环）。
-
-状态转换：
-  init → build_messages → model.generate → parser.parse
-  → if finish: finalize
-  → else dispatch tool → record + update state
-"""
+"""AgentLoop：核心控制循环与兼容 runner。"""
 
 from __future__ import annotations
 
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +15,8 @@ from coding_agent.config import AgentConfig
 from coding_agent.context.manager import ContextManager
 from coding_agent.emitter import EventEmitter
 from coding_agent.events import (
+    FeedbackRecorded,
+    FinishAccepted,
     ModelCompleted,
     ModelFailed,
     ModelResponseSnapshot,
@@ -26,11 +24,14 @@ from coding_agent.events import (
     RunFailed,
     RunFinished,
     RunStarted,
+    RunStateSnapshot,
     ToolCompleted,
+    ToolFailed,
     ToolResultSnapshot,
     ToolStarted,
     TurnEnded,
     TurnStarted,
+    ValidationCompleted,
 )
 from coding_agent.model.client import ModelClient
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
@@ -38,7 +39,7 @@ from coding_agent.model.types import FinishAction, ToolResult
 from coding_agent.recovery.failure_refresh import FailureAwareRefresher
 from coding_agent.runtime.local import LocalRuntime
 from coding_agent.tools.registry import default_registry
-from coding_agent.trajectory.logger import TrajectoryLogger
+from coding_agent.trajectory import TrajectoryEventSink, TrajectoryLogger
 
 
 @dataclass
@@ -54,36 +55,85 @@ class AgentRunResult:
     trajectory_path: Path | None = None
 
 
+def _snapshot(state: AgentState, *, reason: str = "") -> RunStateSnapshot:
+    """Build an immutable terminal view without exposing AgentState containers."""
+    return RunStateSnapshot(
+        status=state.status,
+        reason=reason or (state.stop_reason.value if state.stop_reason else ""),
+        summary=state.finish_summary or "",
+        validation=state.finish_validation or "",
+        validation_skipped_reason=state.finish_validation_skipped_reason or "",
+        steps=state.step_count,
+        total_tokens=state.total_tokens(),
+        modified_files=tuple(sorted(state.modified_files)),
+    )
+
+
 def run(
     task: str,
     workspace: Path,
     config: AgentConfig,
     emitter: EventEmitter | None = None,
     task_mode: TaskMode | str | None = None,
+    trajectory_sink: TrajectoryEventSink | None = None,
 ) -> AgentRunResult:
-    """运行 Agent 完成一个编程任务。
+    """Run the event-only loop and assemble the default trajectory subscriber.
 
-    主入口。
+    This compatibility wrapper is the outer runner for the synchronous API. The
+    loop itself never creates, writes, or closes a ``TrajectoryLogger``.
+    Callers may inject a sink; injected sinks are observed but not owned here.
     """
-    import time
-    import uuid
-
-    start = time.time()
-    run_id = f"run_{int(start)}_{uuid.uuid4().hex[:6]}"
     events = emitter or EventEmitter()
-    turn_number = 0
+    owns_sink = trajectory_sink is None
+    run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    if trajectory_sink is None:
+        logger = TrajectoryLogger(
+            run_id=run_id,
+            workspace=workspace,
+            trace_root=config.trace_root,
+        )
+        trajectory_sink = TrajectoryEventSink(logger)
+    else:
+        run_id = getattr(getattr(trajectory_sink, "logger", None), "run_id", run_id)
+    events.subscribe(trajectory_sink, critical=True)
+    trajectory_path = trajectory_sink.path
+    try:
+        return _run_loop(
+            task=task,
+            workspace=workspace,
+            config=config,
+            events=events,
+            task_mode=task_mode,
+            trajectory_path=trajectory_path,
+            run_id=run_id,
+        )
+    finally:
+        if owns_sink:
+            events.unsubscribe(trajectory_sink)
+            trajectory_sink.close()
 
-    # 1. 初始化
+
+def _run_loop(
+    task: str,
+    workspace: Path,
+    config: AgentConfig,
+    events: EventEmitter,
+    task_mode: TaskMode | str | None = None,
+    trajectory_path: Path | None = None,
+    run_id: str | None = None,
+) -> AgentRunResult:
+    """Execute the AgentLoop; all observability is emitted as typed events."""
+    start = time.time()
+    run_id = run_id or f"run_{int(start)}_{uuid.uuid4().hex[:6]}"
+    turn_number = 0
     state = AgentState.initialize(
         task=task,
         workspace=workspace,
-        task_mode=TaskMode.EXISTING_REPOSITORY.value,  # 占位，下一行立刻覆盖
+        task_mode=TaskMode.EXISTING_REPOSITORY.value,
     )
     brief = TaskBrief.from_user_task(task, task_mode=task_mode, workspace=workspace)
-    # TaskMode 单源：以 brief 的判定为准
     state.task_mode = brief.task_mode.value
 
-    # 2. 注册组件
     runtime = LocalRuntime(workspace=workspace, config=config)
     registry = default_registry()
     model_client = ModelClient.from_config(config)
@@ -96,119 +146,106 @@ def run(
     ))
     finish_policy = FinishPolicy()
     failure_refresher = FailureAwareRefresher(enabled=config.enable_failure_refresh)
-    trajectory = TrajectoryLogger(
-        run_id=run_id,
-        workspace=workspace,
-        trace_root=config.trace_root,
-    )
-    events.emit(RunStarted(run_id=run_id, task=task, workspace=str(workspace)))
 
     try:
-        # 3. 主循环
+        events.emit(RunStarted(run_id=run_id, task=task, workspace=str(workspace)))
         while True:
-            should_stop, stop_reason, feedback = termination.should_stop(state)
+            should_stop, stop_reason, _ = termination.should_stop(state)
             if should_stop:
                 if stop_reason is None:
                     raise RuntimeError("termination requested without a stop reason")
                 state.mark_stopped(stop_reason)
-                trajectory.record_stop(state, stop_reason.value)
+                events.emit(FeedbackRecorded(
+                    run_id=run_id,
+                    step=state.step_count,
+                    kind="stop",
+                    content=stop_reason.value,
+                ))
                 break
 
-            # 构造 messages
             turn_number += 1
             events.emit(TurnStarted(run_id=run_id, turn=turn_number))
             messages = context_manager.build(state, brief)
-
-            # 如果有重复动作反馈，注入到 messages
             repeat_feedback = termination.get_repeated_action_feedback()
             if repeat_feedback:
-                messages.append({
-                    "role": "user",
-                    "content": f"[System Feedback] {repeat_feedback}",
-                })
+                messages.append({"role": "user", "content": f"[System Feedback] {repeat_feedback}"})
 
-            # 调用 LLM
-            events.emit(ModelStarted(
-                run_id=run_id,
-                turn=turn_number,
-                model=getattr(model_client, "model", ""),
-            ))
+            model_name = getattr(model_client, "model", "")
+            events.emit(ModelStarted(run_id=run_id, turn=turn_number, model=model_name))
             try:
-                response = model_client.generate(
-                    messages=messages,
-                    tools=registry.schemas(),
-                )
+                response = model_client.generate(messages=messages, tools=registry.schemas())
             except Exception as exc:
                 events.emit(ModelFailed(
                     run_id=run_id,
                     turn=turn_number,
-                    model=getattr(model_client, "model", ""),
+                    model=model_name,
                     error_type=type(exc).__name__,
                     error=str(exc),
                 ))
                 events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="error"))
                 raise
+
             state.model_calls += 1
             state.total_input_tokens += response.usage.input_tokens
             state.total_output_tokens += response.usage.output_tokens
-            trajectory.record_model_call(state, response)
             events.emit(ModelCompleted(
                 run_id=run_id,
                 turn=turn_number,
-                model=getattr(model_client, "model", ""),
+                model=model_name,
                 response=ModelResponseSnapshot.from_response(response),
             ))
-
-            # 解析
             action = parser.parse(response)
 
             if isinstance(action, FinishAction):
-                # FinishPolicy 校验：只有"修改过 + 验证通过"才接受 finish。
-                # 否则转换为 feedback，让模型继续工作。
                 accepted, feedback = finish_policy.check(state, action)
                 if not accepted:
                     fb_text = f"[FinishPolicy] {feedback}"
                     context_manager.record_feedback(fb_text)
                     state.consecutive_errors += 1
-                    trajectory.record_feedback(state, fb_text)
+                    events.emit(FeedbackRecorded(
+                        run_id=run_id,
+                        step=state.step_count,
+                        kind="finish_rejected",
+                        content=fb_text,
+                    ))
                     state.mark_step_done()
                     events.emit(TurnEnded(
-                        run_id=run_id,
-                        turn=turn_number,
-                        status="finish_rejected",
+                        run_id=run_id, turn=turn_number, status="finish_rejected"
                     ))
                     continue
-                state.mark_finished(
-                    action.summary,
-                    action.validation,
-                    action.validation_skipped_reason,
-                )
-                trajectory.record_finish(state, action)
+
+                state.mark_finished(action.summary, action.validation, action.validation_skipped_reason)
+                events.emit(FinishAccepted(
+                    run_id=run_id,
+                    turn=turn_number,
+                    summary=action.summary,
+                    validation=action.validation,
+                    notes=action.notes,
+                    validation_skipped_reason=action.validation_skipped_reason,
+                ))
                 events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="finished"))
                 break
 
-            # 1) InvalidAction：解析器已捕获错误（empty response / unknown tool / invalid args）
-            # 关键修复：不构造 fake tool message，而是注入高优先级 user feedback
             if action.is_invalid:
                 tool_list = ", ".join(registry.names())
                 feedback = (
                     f"[InvalidAction] {action.error_msg}\n"
                     f"Available tools: {tool_list}.\n"
-                    f"You MUST respond with a valid tool call in your next message. "
-                    f"Do not output plain text without a tool call."
+                    "You MUST respond with a valid tool call in your next message. "
+                    "Do not output plain text without a tool call."
                 )
                 context_manager.record_feedback(feedback)
                 state.consecutive_errors += 1
-                # 审计日志：记录 feedback 事件（不算 tool_call）
-                trajectory.record_feedback(state, feedback)
-                # 注意：feedback 不算真实 step，所以不递增 step_count / tool_calls。
-                # 但 mark_step_done 仍需调用以保证 stagnation signature 推进。
+                events.emit(FeedbackRecorded(
+                    run_id=run_id,
+                    step=state.step_count,
+                    kind="invalid_action",
+                    content=feedback,
+                ))
                 state.mark_step_done()
-                # 不走下面的 dispatch / state 派生 / termination.record_action
                 events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="invalid"))
                 continue
 
-            # 2) ToolAction：dispatch 到 Tool
             events.emit(ToolStarted(
                 run_id=run_id,
                 turn=turn_number,
@@ -217,120 +254,127 @@ def run(
                 arguments=action.arguments,
             ))
             tool = registry.get(action.tool_name)
+            tool_exception: Exception | None = None
             if tool is None:
-                # 未知 tool 优雅降级，告诉模型有哪些可用 tool
                 observation = ToolResult.fail(
-                    f"Unknown tool: '{action.tool_name}'. "
-                    f"Available tools: {', '.join(registry.names())}",
+                    f"Unknown tool: '{action.tool_name}'. Available tools: {', '.join(registry.names())}",
                     is_runtime_error=True,
                 )
                 state.consecutive_errors += 1
             else:
                 try:
                     observation = tool.execute(action.arguments, runtime)
-                    # FailureAwareRefresher: 测试失败时把几百行 traceback
-                    # 压缩成 ~5 行 snapshot，减少 Active Context 占用。
                     observation = failure_refresher.maybe_refresh(state, observation)
                     if observation.success:
                         state.consecutive_errors = 0
                     else:
                         state.consecutive_errors += 1
-                    # timeout 单独计数
-                    if observation.is_timeout:
-                        state.consecutive_timeouts += 1
-                    else:
-                        state.consecutive_timeouts = 0
-                except Exception as e:
-                    observation = tool.exception_observation(e)
+                    state.consecutive_timeouts = (
+                        state.consecutive_timeouts + 1 if observation.is_timeout else 0
+                    )
+                except Exception as exc:
+                    tool_exception = exc
+                    observation = tool.exception_observation(exc)
                     state.consecutive_errors += 1
 
-            # 记录 + 更新状态
-            trajectory.record_tool_call(state, action, observation)
-            events.emit(ToolCompleted(
-                run_id=run_id,
-                turn=turn_number,
-                tool_name=action.tool_name,
-                action_id=action.action_id,
-                result=ToolResultSnapshot.from_result(observation),
-            ))
+            result_snapshot = ToolResultSnapshot.from_result(observation)
+            if tool_exception is not None or observation.is_runtime_error:
+                events.emit(ToolFailed(
+                    run_id=run_id,
+                    turn=turn_number,
+                    tool_name=action.tool_name,
+                    action_id=action.action_id,
+                    arguments=action.arguments,
+                    args_hash=action.args_hash,
+                    error_type=type(tool_exception).__name__ if tool_exception else "RuntimeError",
+                    error=observation.error or observation.content,
+                    result=result_snapshot,
+                ))
+            else:
+                events.emit(ToolCompleted(
+                    run_id=run_id,
+                    turn=turn_number,
+                    tool_name=action.tool_name,
+                    action_id=action.action_id,
+                    arguments=action.arguments,
+                    args_hash=action.args_hash,
+                    result=result_snapshot,
+                ))
+
             state.step_count += 1
             state.tool_calls += 1
             state.record_action(action.tool_name, action.args_hash)
 
-            # 派生状态更新（基于 tool_name 分类）
             if action.tool_name in ("apply_patch", "patch"):
                 if observation.success and action.arguments.get("path"):
-                    state.record_modified(action.arguments["path"])
-                    state.add_finding(f"Modified {action.arguments['path']}")
-                    # 记录 mutation 发生位置（FinishPolicy 用）
+                    path = str(action.arguments["path"])
+                    state.record_modified(path)
+                    state.add_finding(f"Modified {path}")
                     state.record_mutation(state.step_count)
             elif action.tool_name == "read_file":
                 if observation.success and action.arguments.get("path"):
-                    state.record_inspected(action.arguments["path"])
-            elif action.tool_name == "search_code":
-                if observation.success:
-                    # 抽取匹配数
-                    import re as _re
-
-                    m = _re.search(r"Found (\d+) matches", observation.content)
-                    if m:
-                        state.add_finding(
-                            f"search_code('{action.arguments.get('query', '')}') → {m.group(1)} matches"
-                        )
+                    state.record_inspected(str(action.arguments["path"]))
+            elif action.tool_name == "search_code" and observation.success:
+                import re
+                match = re.search(r"Found (\d+) matches", observation.content)
+                if match:
+                    state.add_finding(
+                        f"search_code('{action.arguments.get('query', '')}') → {match.group(1)} matches"
+                    )
             elif action.tool_name == "run_command":
-                # 命令是测试且失败 → 记录
                 if observation.is_validation_failure:
                     state.recent_validation = observation.summary or "test failed"
-                    state.add_finding(
-                        f"Test failure: {observation.summary or 'see logs'}"
-                    )
+                    state.add_finding(f"Test failure: {observation.summary or 'see logs'}")
                     state.add_open_question(
                         "Why did the test fail? Inspect modified files and recent test output."
                     )
-                # 识别 validation run 并记录到 state（无论 pass/fail）
-                cmd = action.arguments.get("command", "")
-                verdict = classify_validation(observation, cmd)
+                command = str(action.arguments.get("command", ""))
+                verdict = classify_validation(observation, command)
                 if verdict.is_validation:
+                    passed = bool(verdict.passed)
                     state.record_validation(
                         step=state.step_count,
-                        command=cmd,
-                        passed=bool(verdict.passed),
+                        command=command,
+                        passed=passed,
                         summary=verdict.reason,
                     )
+                    events.emit(ValidationCompleted(
+                        run_id=run_id,
+                        step=state.step_count,
+                        command=command,
+                        is_validation=True,
+                        passed=verdict.passed,
+                        summary=verdict.reason,
+                        is_runtime_error=observation.is_runtime_error,
+                    ))
 
             if observation.is_validation_failure:
                 state.recent_validation = observation.summary
-
-            # 注入 Observation 到 Active Context
             context_manager.record_observation(state, action, observation)
-
             termination.record_action(
                 action.tool_name,
                 action.args_hash,
                 observation_changed=observation.success,
             )
-
-            # 记录 step 状态指纹（stagnation 检测用）
             state.mark_step_done()
             events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="completed"))
 
     except Exception as exc:
         state.status = "ERROR"
-        events.emit(RunFailed(
-            run_id=run_id,
-            error_type=type(exc).__name__,
-            error=str(exc),
-        ))
-        raise
-    finally:
-        if state.status != "ERROR":
-            events.emit(RunFinished(
+        try:
+            events.emit(RunFailed(
                 run_id=run_id,
-                status=state.status,
-                reason=state.stop_reason.value if state.stop_reason else "unknown",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                final_state=_snapshot(state, reason=type(exc).__name__),
             ))
-        trajectory.close()
+        except Exception:
+            # A failed critical sink is already unhealthy; preserve the original
+            # exception rather than replacing it with terminal-event delivery.
+            pass
+        raise
 
+    events.emit(RunFinished(run_id=run_id, final_state=_snapshot(state)))
     return AgentRunResult(
         summary=state.finish_summary or "(no summary)",
         validation=state.finish_validation or "",
@@ -338,5 +382,5 @@ def run(
         steps=state.step_count,
         total_tokens=state.total_tokens(),
         duration=time.time() - start,
-        trajectory_path=trajectory.path,
+        trajectory_path=trajectory_path,
     )

@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, ClassVar, TypeAlias
 
@@ -25,9 +27,13 @@ def _freeze(value: Any) -> ImmutableValue:
         return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
         return tuple(_freeze(item) for item in value)
+    if isinstance(value, Enum):
+        return _freeze(value.value)
+    if isinstance(value, Path):
+        return str(value)
     if isinstance(value, (str, int, float, bool, type(None))):
         return value
-    return repr(value)
+    raise TypeError(f"unsupported immutable event value: {type(value).__name__}")
 
 
 def _freeze_arguments(value: Any) -> Mapping[str, ImmutableValue]:
@@ -133,10 +139,36 @@ class RunStarted(BaseEvent):
 
 
 @dataclass(frozen=True, kw_only=True)
-class RunFinished(BaseEvent):
-    event_type: ClassVar[str] = "run_finished"
+class RunStateSnapshot:
+    """Immutable terminal state shared by terminal run events."""
+
     status: str = ""
     reason: str = ""
+    summary: str = ""
+    validation: str = ""
+    validation_skipped_reason: str = ""
+    steps: int = 0
+    total_tokens: int = 0
+    modified_files: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "modified_files", tuple(self.modified_files))
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunFinished(BaseEvent):
+    event_type: ClassVar[str] = "run_finished"
+    final_state: RunStateSnapshot = RunStateSnapshot()
+
+    @property
+    def status(self) -> str:
+        """Compatibility view for callers that used the pre-snapshot field."""
+        return self.final_state.status
+
+    @property
+    def reason(self) -> str:
+        """Compatibility view for callers that used the pre-snapshot field."""
+        return self.final_state.reason
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -144,6 +176,7 @@ class RunFailed(BaseEvent):
     event_type: ClassVar[str] = "run_failed"
     error_type: str = ""
     error: str = ""
+    final_state: RunStateSnapshot = RunStateSnapshot()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -157,6 +190,35 @@ class TurnEnded(BaseEvent):
     event_type: ClassVar[str] = "turn_ended"
     turn: int = 0
     status: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
+class FeedbackRecorded(BaseEvent):
+    event_type: ClassVar[str] = "feedback_recorded"
+    step: int = 0
+    kind: str = ""
+    content: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
+class ValidationCompleted(BaseEvent):
+    event_type: ClassVar[str] = "validation_completed"
+    step: int = 0
+    command: str = ""
+    is_validation: bool = True
+    passed: bool | None = None
+    summary: str = ""
+    is_runtime_error: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class FinishAccepted(BaseEvent):
+    event_type: ClassVar[str] = "finish_accepted"
+    turn: int = 0
+    summary: str = ""
+    validation: str = ""
+    notes: str = ""
+    validation_skipped_reason: str = ""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -208,11 +270,35 @@ class ToolCompleted(BaseEvent):
     turn: int = 0
     tool_name: str = ""
     action_id: str = ""
+    arguments: Mapping[str, ImmutableValue] | None = None
+    args_hash: str = ""
     result: ToolResultSnapshot | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.result is not None and not isinstance(self.result, ToolResultSnapshot):
+        if self.arguments is not None:
+            object.__setattr__(self, "arguments", _freeze_arguments(self.arguments))
+        if self.result is not None:
+            object.__setattr__(self, "result", ToolResultSnapshot.from_result(self.result))
+
+
+@dataclass(frozen=True, kw_only=True)
+class ToolFailed(BaseEvent):
+    event_type: ClassVar[str] = "tool_failed"
+    turn: int = 0
+    tool_name: str = ""
+    action_id: str = ""
+    arguments: Mapping[str, ImmutableValue] | None = None
+    args_hash: str = ""
+    error_type: str = ""
+    error: str = ""
+    result: ToolResultSnapshot | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.arguments is not None:
+            object.__setattr__(self, "arguments", _freeze_arguments(self.arguments))
+        if self.result is not None:
             object.__setattr__(self, "result", ToolResultSnapshot.from_result(self.result))
 
 
@@ -220,6 +306,9 @@ AgentEvent: TypeAlias = (
     RunStarted
     | RunFinished
     | RunFailed
+    | FeedbackRecorded
+    | ValidationCompleted
+    | FinishAccepted
     | TurnStarted
     | TurnEnded
     | ModelStarted
@@ -227,11 +316,14 @@ AgentEvent: TypeAlias = (
     | ModelFailed
     | ToolStarted
     | ToolCompleted
+    | ToolFailed
 )
 
 __all__ = [
     "AgentEvent",
     "BaseEvent",
+    "FeedbackRecorded",
+    "FinishAccepted",
     "ModelCompleted",
     "ModelFailed",
     "ModelResponseSnapshot",
@@ -239,10 +331,13 @@ __all__ = [
     "RunFailed",
     "RunFinished",
     "RunStarted",
+    "RunStateSnapshot",
     "ToolCallSnapshot",
     "ToolCompleted",
+    "ToolFailed",
     "ToolResultSnapshot",
     "ToolStarted",
     "TurnEnded",
     "TurnStarted",
+    "ValidationCompleted",
 ]

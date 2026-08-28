@@ -6,6 +6,7 @@ from coding_agent.agent.loop import run
 from coding_agent.config import AgentConfig
 from coding_agent.emitter import EventCollector, EventEmitter
 from coding_agent.events import (
+    FinishAccepted,
     ModelCompleted,
     ModelFailed,
     ModelResponseSnapshot,
@@ -18,6 +19,7 @@ from coding_agent.events import (
     ToolStarted,
     TurnEnded,
     TurnStarted,
+    ValidationCompleted,
 )
 from coding_agent.model.client import ModelClient
 from coding_agent.model.types import ModelResponse, TokenUsage, ToolCall, ToolResult
@@ -93,8 +95,9 @@ def test_agent_loop_emits_lifecycle_order(monkeypatch, tmp_path):
         TurnStarted, ModelStarted, ModelCompleted, ToolStarted, ToolCompleted,
         TurnEnded,
         TurnStarted, ModelStarted, ModelCompleted, ToolStarted, ToolCompleted,
+        ValidationCompleted,
         TurnEnded,
-        TurnStarted, ModelStarted, ModelCompleted, TurnEnded,
+        TurnStarted, ModelStarted, ModelCompleted, FinishAccepted, TurnEnded,
         RunFinished,
     ]
     sequences = [event.sequence for event in collector.events]

@@ -9,11 +9,9 @@ P1-4：轨迹文件写到 ~/.traceforce/runs/<workspace-basename>/run_<id>/traje
 from __future__ import annotations
 
 import json
-import time
-import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 def _default_trace_root() -> Path:
@@ -38,7 +36,7 @@ class TrajectoryLogger:
         self,
         run_id: str,
         workspace: Path,
-        trace_root: Optional[Path] = None,
+        trace_root: Path | None = None,
     ):
         self.run_id = run_id
         self.workspace = workspace
@@ -51,13 +49,17 @@ class TrajectoryLogger:
         self._file = self.path.open("a", encoding="utf-8")
         self._counter = 0
 
+    def write_record(self, event: dict[str, Any]) -> None:
+        """Write one already-serialized event without altering its sequence."""
+        self._file.write(json.dumps(event, ensure_ascii=False))
+        self._file.write("\n")
+        self._file.flush()
+
     def _write(self, event: dict[str, Any]) -> None:
         self._counter += 1
         event["event_id"] = self._counter
         event["timestamp"] = datetime.utcnow().isoformat()
-        self._file.write(json.dumps(event, ensure_ascii=False, default=str))
-        self._file.write("\n")
-        self._file.flush()
+        self.write_record(event)
 
     # ----- 各种事件类型 -----
 
@@ -67,7 +69,7 @@ class TrajectoryLogger:
             "run_id": self.run_id,
             "step": state.step_count,
             "type": "model_call",
-            "model": getattr(response, "raw", {}).model if hasattr(response, "raw") and response.raw else "unknown",
+            "model": getattr(getattr(response, "raw", None), "model", "unknown"),
             "input_tokens": response.usage.input_tokens,
             "output_tokens": response.usage.output_tokens,
             "tool_calls_count": len(response.tool_calls),

@@ -12,6 +12,15 @@ _log = logging.getLogger(__name__)
 EventSink = Callable[[AgentEvent], None]
 
 
+class CriticalEventDeliveryError(RuntimeError):
+    """One or more critical event sinks could not consume an event."""
+
+    def __init__(self, errors: list[tuple[EventSink, Exception, AgentEvent]]):
+        self.errors = errors
+        details = "; ".join(f"{type(error).__name__}: {error}" for _, error, _ in errors)
+        super().__init__(f"critical event sink failure: {details}")
+
+
 class EventEmitter:
     """Emit immutable event snapshots synchronously in registration order."""
 
@@ -23,14 +32,18 @@ class EventEmitter:
         self._sinks: list[EventSink] = []
         self._sequence = 0
         self._on_sink_error = on_sink_error
+        self._critical_sinks: set[EventSink] = set()
+        self._unhealthy_sinks: set[EventSink] = set()
 
     @property
     def sequence(self) -> int:
         return self._sequence
 
-    def subscribe(self, sink: EventSink) -> EventSink:
+    def subscribe(self, sink: EventSink, *, critical: bool = False) -> EventSink:
         if sink not in self._sinks:
             self._sinks.append(sink)
+        if critical or bool(getattr(sink, "critical", False)):
+            self._critical_sinks.add(sink)
         return sink
 
     def unsubscribe(self, sink: EventSink) -> None:
@@ -38,20 +51,30 @@ class EventEmitter:
             self._sinks.remove(sink)
         except ValueError:
             pass
+        self._critical_sinks.discard(sink)
+        self._unhealthy_sinks.discard(sink)
 
     def emit(self, event: BaseEvent) -> AgentEvent:
         self._sequence += 1
         assigned: AgentEvent = replace(event, sequence=self._sequence)  # type: ignore[assignment]
+        errors: list[tuple[EventSink, Exception, AgentEvent]] = []
         for sink in tuple(self._sinks):
+            if sink in self._unhealthy_sinks:
+                continue
             try:
                 sink(assigned)
-            except Exception as exc:  # sinks are observers, never loop control
+            except Exception as exc:  # sinks never interrupt sibling sinks
                 _log.exception("Event sink failed for %s", assigned.event_type)
-                if self._on_sink_error is not None:
+                if sink in self._critical_sinks:
+                    self._unhealthy_sinks.add(sink)
+                    errors.append((sink, exc, assigned))
+                elif self._on_sink_error is not None:
                     try:
                         self._on_sink_error(sink, exc, assigned)
                     except Exception:
                         _log.exception("Event sink error handler failed")
+        if errors:
+            raise CriticalEventDeliveryError(errors)
         return assigned
 
 
@@ -68,4 +91,4 @@ class EventCollector:
         self.events.clear()
 
 
-__all__ = ["EventCollector", "EventEmitter", "EventSink"]
+__all__ = ["CriticalEventDeliveryError", "EventCollector", "EventEmitter", "EventSink"]

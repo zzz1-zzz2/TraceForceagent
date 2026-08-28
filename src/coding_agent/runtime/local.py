@@ -56,6 +56,7 @@ class LocalRuntime(Runtime):
                 text=True,
                 timeout=timeout,
                 env=full_env,
+                executable="/bin/bash",
             )
             duration = time.time() - start
 

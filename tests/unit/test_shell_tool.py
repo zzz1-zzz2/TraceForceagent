@@ -102,6 +102,9 @@ class TestValidationCommandClassifier:
             "echo pytest",
             'printf "test complete"',
             "git diff -- tests/test_app.py",
+            "pytest || true",
+            "pytest; echo done",
+            "pytest | tee test.log",
         ],
     )
     def test_non_validation_commands_are_not_classified(self, command):
@@ -112,6 +115,7 @@ class TestValidationCommandClassifier:
         [
             "pytest -q",
             f"{PY} -m pytest tests",
+            "setup && pytest -q",
             "python3 -m py_compile app.py",
             "gcc -fsyntax-only main.c",
             "g++ -fsyntax-only main.cpp",
@@ -121,7 +125,8 @@ class TestValidationCommandClassifier:
             "dotnet test",
             "dotnet build",
             "php -l index.php",
+            "set -o pipefail && pytest | tee test.log",
         ],
     )
-    def test_executable_validation_commands_are_classified(self, command):
+    def test_reliable_validation_commands_are_classified(self, command):
         assert RunCommandTool.is_test_command(command)

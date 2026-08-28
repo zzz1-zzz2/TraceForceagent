@@ -119,22 +119,91 @@ class RunCommandTool(Tool):
 
     @staticmethod
     def is_test_command(command: str) -> bool:
-        """判断命令是否属于可执行 validation。"""
+        """判断命令是否是退出状态可靠的 validation。"""
         import re
 
         normalized = command.strip().lower()
-        patterns = (
-            r"(?:^|&&|;|\|\|)\s*(?:[^\s;&|]*/)?(?:python3?|py)\s+-m\s+(?:pytest|unittest|py_compile|compileall)\b",
-            r"(?:^|&&|;|\|\|)\s*(?:pytest|py\.test|nosetests|jest|flake8|mypy)\b",
-            r"(?:^|&&|;|\|\|)\s*(?:npm|yarn|pnpm)\s+(?:test|build)\b",
-            r"(?:^|&&|;|\|\|)\s*(?:npm|yarn|pnpm)\s+run\s+(?:test|build|lint|check)\b",
-            r"(?:^|&&|;|\|\|)\s*(?:cargo|go|mvn|gradle|make|tox|nox)\s+(?:test|check|build|vet|lint)\b",
-            r"(?:^|&&|;|\|\|)\s*(?:gcc|g\+\+|clang|clang\+\+)\s+[^;&|]*-fsyntax-only\b",
-            r"(?:^|&&|;|\|\|)\s*javac\b",
-            r"(?:^|&&|;|\|\|)\s*node\s+--check\b",
-            r"(?:^|&&|;|\|\|)\s*tsc\b[^;&|]*--noemit\b",
-            r"(?:^|&&|;|\|\|)\s*dotnet\s+(?:test|build)\b",
-            r"(?:^|&&|;|\|\|)\s*php\s+-l\b",
-            r"(?:^|&&|;|\|\|)\s*ruff\s+(?:check|format\s+--check)\b",
+        if not normalized:
+            return False
+
+        # Split only on shell operators outside quotes.  A substring search is
+        # unsafe here: ``echo pytest`` and ``git diff -- tests/...`` are not
+        # validation commands, and shell combinators can hide a failed check.
+        parts: list[tuple[str, str | None]] = []
+        current: list[str] = []
+        quote: str | None = None
+        escaped = False
+        pending_operator: str | None = None
+        index = 0
+        while index < len(normalized):
+            char = normalized[index]
+            if escaped:
+                current.append(char)
+                escaped = False
+                index += 1
+                continue
+            if char == "\\" and quote != "'":
+                current.append(char)
+                escaped = True
+                index += 1
+                continue
+            if quote:
+                current.append(char)
+                if char == quote:
+                    quote = None
+                index += 1
+                continue
+            if char in ("'", '"'):
+                quote = char
+                current.append(char)
+                index += 1
+                continue
+            if normalized.startswith("&&", index) or normalized.startswith("||", index):
+                parts.append(("".join(current).strip(), pending_operator))
+                current = []
+                pending_operator = normalized[index:index + 2]
+                index += 2
+                continue
+            if char in ";|":
+                parts.append(("".join(current).strip(), pending_operator))
+                current = []
+                pending_operator = char
+                index += 1
+                continue
+            current.append(char)
+            index += 1
+        parts.append(("".join(current).strip(), pending_operator))
+
+        segment_patterns = (
+            r"(?:(?:[a-z_][a-z0-9_]*=[^\s;&|]+)\s+)*(?:[^\s;&|]+/)*(?:python3?|py)\s+-m\s+(?:pytest|unittest|py_compile|compileall)\b",
+            r"(?:(?:[a-z_][a-z0-9_]*=[^\s;&|]+)\s+)*(?:[^\s;&|]+/)*(?:pytest|py\.test|nosetests|jest|flake8|mypy)\b",
+            r"(?:npm|yarn|pnpm)\s+(?:(?:run\s+)?(?:test|build|lint|check))\b",
+            r"(?:cargo|go|mvn|gradle|make|tox|nox)\s+(?:test|check|build|vet|lint)\b",
+            r"(?:gcc|g\+\+|clang|clang\+\+)\s+[^;&|]*-fsyntax-only\b",
+            r"javac\b",
+            r"node\s+--check\b",
+            r"tsc\b[^;&|]*--noemit\b",
+            r"dotnet\s+(?:test|build)\b",
+            r"php\s+-l\b",
+            r"ruff\s+(?:check|format\s+--check)\b",
         )
-        return any(re.search(pattern, normalized) for pattern in patterns)
+
+        validation_indexes = [
+            index for index, (segment, _operator) in enumerate(parts)
+            if any(re.match(pattern, segment) for pattern in segment_patterns)
+        ]
+        if not validation_indexes:
+            return False
+
+        first_validation = validation_indexes[0]
+        # A validation may be preceded by setup commands (``setup && pytest``),
+        # but once it starts, ';' and '||' can make a later command mask failure.
+        for _segment, operator in parts[first_validation + 1:]:
+            if operator in (";", "||"):
+                return False
+            if operator == "|":
+                # Plain pipelines report the last process' status.  Accept one
+                # only when this shell explicitly enabled pipefail.
+                if not re.search(r"(?:^|[;&|])\s*set\s+-o\s+pipefail\b", normalized):
+                    return False
+        return True

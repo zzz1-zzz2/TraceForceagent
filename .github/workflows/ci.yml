@@ -29,10 +29,17 @@ jobs:
 
       - name: Run unit test suite
         # Original P1 baseline: 173 tests had zero regressions.
-        # P1.1 adds five policy/mode tests; current total: 178 passed.
-        # Any failure is a P1 regression and must fail CI.
+        # P2-1B currently exercises 208 tests; any failure fails CI.
         run: |
           python -m pytest tests/ -q --maxfail=1 --tb=short
+
+      - name: Type-check lifecycle and trajectory modules
+        run: |
+          python -m mypy \
+            src/coding_agent/events.py \
+            src/coding_agent/emitter.py \
+            src/coding_agent/trajectory \
+            src/coding_agent/agent/loop.py
 
       - name: Smoke-check CLI loads
         # 不依赖 ripgrep / API key,只验证 CLI module 能正常 import + typer
