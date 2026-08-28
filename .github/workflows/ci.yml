@@ -28,8 +28,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run unit test suite
-        # Original P1 baseline: 173 tests had zero regressions.
-        # P2-1B currently exercises 208 tests; any failure fails CI.
+        # P2-1B lifecycle, trajectory, and regression coverage.
         run: |
           python -m pytest tests/ -q --maxfail=1 --tb=short
 

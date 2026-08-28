@@ -215,16 +215,19 @@ class ValidationCompleted(BaseEvent):
 class FinishAccepted(BaseEvent):
     event_type: ClassVar[str] = "finish_accepted"
     turn: int = 0
+    step: int = 0
     summary: str = ""
     validation: str = ""
     notes: str = ""
     validation_skipped_reason: str = ""
+    final_state: RunStateSnapshot = RunStateSnapshot()
 
 
 @dataclass(frozen=True, kw_only=True)
 class ModelStarted(BaseEvent):
     event_type: ClassVar[str] = "model_started"
     turn: int = 0
+    step: int = 0
     model: str = ""
 
 
@@ -232,6 +235,7 @@ class ModelStarted(BaseEvent):
 class ModelCompleted(BaseEvent):
     event_type: ClassVar[str] = "model_completed"
     turn: int = 0
+    step: int = 0
     model: str = ""
     response: ModelResponseSnapshot | None = None
 
@@ -245,6 +249,7 @@ class ModelCompleted(BaseEvent):
 class ModelFailed(BaseEvent):
     event_type: ClassVar[str] = "model_failed"
     turn: int = 0
+    step: int = 0
     model: str = ""
     error_type: str = ""
     error: str = ""
@@ -254,6 +259,7 @@ class ModelFailed(BaseEvent):
 class ToolStarted(BaseEvent):
     event_type: ClassVar[str] = "tool_started"
     turn: int = 0
+    step: int = 0
     tool_name: str = ""
     action_id: str = ""
     arguments: Mapping[str, ImmutableValue] | None = None
@@ -268,6 +274,7 @@ class ToolStarted(BaseEvent):
 class ToolCompleted(BaseEvent):
     event_type: ClassVar[str] = "tool_completed"
     turn: int = 0
+    step: int = 0
     tool_name: str = ""
     action_id: str = ""
     arguments: Mapping[str, ImmutableValue] | None = None
@@ -286,6 +293,7 @@ class ToolCompleted(BaseEvent):
 class ToolFailed(BaseEvent):
     event_type: ClassVar[str] = "tool_failed"
     turn: int = 0
+    step: int = 0
     tool_name: str = ""
     action_id: str = ""
     arguments: Mapping[str, ImmutableValue] | None = None

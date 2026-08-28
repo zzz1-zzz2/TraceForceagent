@@ -50,6 +50,7 @@ def test_event_to_record_is_json_safe_and_preserves_identity():
     assert record["run_id"] == "run-1"
     assert record["sequence"] == 7
     assert record["timestamp"] == 12.5
+    assert record["step"] == 0
     assert record["args"]["path"] == "src/app.py"
     assert len(record["result_content"]) == 1000
     assert record["is_validation_failure"] is True
@@ -80,7 +81,7 @@ def test_run_finished_serializes_terminal_snapshot():
             modified_files=("b.py", "a.py"),
         ),
     ))
-    assert record["type"] == "finish"
+    assert record["type"] == "run_finished"
     assert record["status"] == "COMPLETED"
     assert record["total_steps"] == 2
     assert record["modified_files"] == ["b.py", "a.py"]

@@ -35,7 +35,7 @@ from coding_agent.events import (
 )
 from coding_agent.model.client import ModelClient
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
-from coding_agent.model.types import FinishAction, ToolResult
+from coding_agent.model.types import AgentAction, FinishAction, ToolResult
 from coding_agent.recovery.failure_refresh import FailureAwareRefresher
 from coding_agent.runtime.local import LocalRuntime
 from coding_agent.tools.registry import default_registry
@@ -79,23 +79,18 @@ def run(
 ) -> AgentRunResult:
     """Run the event-only loop and assemble the default trajectory subscriber.
 
-    This compatibility wrapper is the outer runner for the synchronous API. The
-    loop itself never creates, writes, or closes a ``TrajectoryLogger``.
-    Callers may inject a sink; injected sinks are observed but not owned here.
+    The loop itself never creates, writes, or closes a ``TrajectoryLogger``.
+    Injected sinks are observed but not owned by this compatibility wrapper.
     """
     events = emitter or EventEmitter()
     owns_sink = trajectory_sink is None
     run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:6]}"
     if trajectory_sink is None:
-        logger = TrajectoryLogger(
-            run_id=run_id,
-            workspace=workspace,
-            trace_root=config.trace_root,
-        )
+        logger = TrajectoryLogger(run_id=run_id, workspace=workspace, trace_root=config.trace_root)
         trajectory_sink = TrajectoryEventSink(logger)
     else:
         run_id = getattr(getattr(trajectory_sink, "logger", None), "run_id", run_id)
-    events.subscribe(trajectory_sink, critical=True)
+    events.subscribe(trajectory_sink, critical=True, prepend=True)
     trajectory_path = trajectory_sink.path
     try:
         return _run_loop(
@@ -126,6 +121,10 @@ def _run_loop(
     start = time.time()
     run_id = run_id or f"run_{int(start)}_{uuid.uuid4().hex[:6]}"
     turn_number = 0
+    active_turn: int | None = None
+    active_model = False
+    active_tool: tuple[AgentAction, ToolResult | None] | None = None
+
     state = AgentState.initialize(
         task=task,
         workspace=workspace,
@@ -147,6 +146,11 @@ def _run_loop(
     finish_policy = FinishPolicy()
     failure_refresher = FailureAwareRefresher(enabled=config.enable_failure_refresh)
 
+    def end_turn(turn: int, status: str) -> None:
+        nonlocal active_turn
+        events.emit(TurnEnded(run_id=run_id, turn=turn, status=status))
+        active_turn = None
+
     try:
         events.emit(RunStarted(run_id=run_id, task=task, workspace=str(workspace)))
         while True:
@@ -164,6 +168,7 @@ def _run_loop(
                 break
 
             turn_number += 1
+            active_turn = turn_number
             events.emit(TurnStarted(run_id=run_id, turn=turn_number))
             messages = context_manager.build(state, brief)
             repeat_feedback = termination.get_repeated_action_feedback()
@@ -171,26 +176,36 @@ def _run_loop(
                 messages.append({"role": "user", "content": f"[System Feedback] {repeat_feedback}"})
 
             model_name = getattr(model_client, "model", "")
-            events.emit(ModelStarted(run_id=run_id, turn=turn_number, model=model_name))
+            active_model = True
+            events.emit(ModelStarted(
+                run_id=run_id,
+                turn=turn_number,
+                step=state.step_count,
+                model=model_name,
+            ))
             try:
                 response = model_client.generate(messages=messages, tools=registry.schemas())
             except Exception as exc:
                 events.emit(ModelFailed(
                     run_id=run_id,
                     turn=turn_number,
+                    step=state.step_count,
                     model=model_name,
                     error_type=type(exc).__name__,
                     error=str(exc),
                 ))
-                events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="error"))
+                active_model = False
+                end_turn(turn_number, "error")
                 raise
 
             state.model_calls += 1
             state.total_input_tokens += response.usage.input_tokens
             state.total_output_tokens += response.usage.output_tokens
+            active_model = False
             events.emit(ModelCompleted(
                 run_id=run_id,
                 turn=turn_number,
+                step=state.step_count,
                 model=model_name,
                 response=ModelResponseSnapshot.from_response(response),
             ))
@@ -209,21 +224,21 @@ def _run_loop(
                         content=fb_text,
                     ))
                     state.mark_step_done()
-                    events.emit(TurnEnded(
-                        run_id=run_id, turn=turn_number, status="finish_rejected"
-                    ))
+                    end_turn(turn_number, "finish_rejected")
                     continue
 
                 state.mark_finished(action.summary, action.validation, action.validation_skipped_reason)
                 events.emit(FinishAccepted(
                     run_id=run_id,
                     turn=turn_number,
+                    step=state.step_count,
                     summary=action.summary,
                     validation=action.validation,
                     notes=action.notes,
                     validation_skipped_reason=action.validation_skipped_reason,
+                    final_state=_snapshot(state),
                 ))
-                events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="finished"))
+                end_turn(turn_number, "finished")
                 break
 
             if action.is_invalid:
@@ -243,12 +258,14 @@ def _run_loop(
                     content=feedback,
                 ))
                 state.mark_step_done()
-                events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="invalid"))
+                end_turn(turn_number, "invalid")
                 continue
 
+            active_tool = (action, None)
             events.emit(ToolStarted(
                 run_id=run_id,
                 turn=turn_number,
+                step=state.step_count,
                 tool_name=action.tool_name,
                 action_id=action.action_id,
                 arguments=action.arguments,
@@ -276,35 +293,12 @@ def _run_loop(
                     tool_exception = exc
                     observation = tool.exception_observation(exc)
                     state.consecutive_errors += 1
+            active_tool = (action, observation)
 
-            result_snapshot = ToolResultSnapshot.from_result(observation)
-            if tool_exception is not None or observation.is_runtime_error:
-                events.emit(ToolFailed(
-                    run_id=run_id,
-                    turn=turn_number,
-                    tool_name=action.tool_name,
-                    action_id=action.action_id,
-                    arguments=action.arguments,
-                    args_hash=action.args_hash,
-                    error_type=type(tool_exception).__name__ if tool_exception else "RuntimeError",
-                    error=observation.error or observation.content,
-                    result=result_snapshot,
-                ))
-            else:
-                events.emit(ToolCompleted(
-                    run_id=run_id,
-                    turn=turn_number,
-                    tool_name=action.tool_name,
-                    action_id=action.action_id,
-                    arguments=action.arguments,
-                    args_hash=action.args_hash,
-                    result=result_snapshot,
-                ))
-
+            # Commit all core facts before announcing the tool's terminal event.
             state.step_count += 1
             state.tool_calls += 1
             state.record_action(action.tool_name, action.args_hash)
-
             if action.tool_name in ("apply_patch", "patch"):
                 if observation.success and action.arguments.get("path"):
                     path = str(action.arguments["path"])
@@ -331,13 +325,46 @@ def _run_loop(
                 command = str(action.arguments.get("command", ""))
                 verdict = classify_validation(observation, command)
                 if verdict.is_validation:
-                    passed = bool(verdict.passed)
                     state.record_validation(
                         step=state.step_count,
                         command=command,
-                        passed=passed,
+                        passed=bool(verdict.passed),
                         summary=verdict.reason,
                     )
+            if observation.is_validation_failure:
+                state.recent_validation = observation.summary
+
+            result_snapshot = ToolResultSnapshot.from_result(observation)
+            if tool_exception is not None or observation.is_runtime_error:
+                events.emit(ToolFailed(
+                    run_id=run_id,
+                    turn=turn_number,
+                    step=state.step_count,
+                    tool_name=action.tool_name,
+                    action_id=action.action_id,
+                    arguments=action.arguments,
+                    args_hash=action.args_hash,
+                    error_type=type(tool_exception).__name__ if tool_exception else "RuntimeError",
+                    error=observation.error or observation.content,
+                    result=result_snapshot,
+                ))
+            else:
+                events.emit(ToolCompleted(
+                    run_id=run_id,
+                    turn=turn_number,
+                    step=state.step_count,
+                    tool_name=action.tool_name,
+                    action_id=action.action_id,
+                    arguments=action.arguments,
+                    args_hash=action.args_hash,
+                    result=result_snapshot,
+                ))
+
+            active_tool = None
+            if action.tool_name == "run_command":
+                command = str(action.arguments.get("command", ""))
+                verdict = classify_validation(observation, command)
+                if verdict.is_validation:
                     events.emit(ValidationCompleted(
                         run_id=run_id,
                         step=state.step_count,
@@ -348,8 +375,6 @@ def _run_loop(
                         is_runtime_error=observation.is_runtime_error,
                     ))
 
-            if observation.is_validation_failure:
-                state.recent_validation = observation.summary
             context_manager.record_observation(state, action, observation)
             termination.record_action(
                 action.tool_name,
@@ -357,9 +382,49 @@ def _run_loop(
                 observation_changed=observation.success,
             )
             state.mark_step_done()
-            events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="completed"))
+            end_turn(turn_number, "completed")
 
+        events.emit(RunFinished(run_id=run_id, final_state=_snapshot(state)))
     except Exception as exc:
+        if active_model:
+            active_model = False
+            try:
+                events.emit(ModelFailed(
+                    run_id=run_id,
+                    turn=turn_number,
+                    step=state.step_count,
+                    model=getattr(model_client, "model", ""),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                ))
+            except Exception:
+                pass
+        if active_tool is not None:
+            active_action = active_tool[0]
+            active_observation: ToolResult | None = active_tool[1]
+            active_tool = None
+            try:
+                events.emit(ToolFailed(
+                    run_id=run_id,
+                    turn=turn_number,
+                    step=state.step_count,
+                    tool_name=active_action.tool_name,
+                    action_id=active_action.action_id,
+                    arguments=active_action.arguments,
+                    args_hash=active_action.args_hash,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    result=ToolResultSnapshot.from_result(active_observation) if active_observation else None,
+                ))
+            except Exception:
+                pass
+        if active_turn is not None:
+            turn = active_turn
+            active_turn = None
+            try:
+                events.emit(TurnEnded(run_id=run_id, turn=turn, status="error"))
+            except Exception:
+                pass
         state.status = "ERROR"
         try:
             events.emit(RunFailed(
@@ -369,12 +434,10 @@ def _run_loop(
                 final_state=_snapshot(state, reason=type(exc).__name__),
             ))
         except Exception:
-            # A failed critical sink is already unhealthy; preserve the original
-            # exception rather than replacing it with terminal-event delivery.
+            # Preserve the original exception if terminal persistence has failed.
             pass
         raise
 
-    events.emit(RunFinished(run_id=run_id, final_state=_snapshot(state)))
     return AgentRunResult(
         summary=state.finish_summary or "(no summary)",
         validation=state.finish_validation or "",

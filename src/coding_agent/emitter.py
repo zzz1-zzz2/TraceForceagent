@@ -34,14 +34,24 @@ class EventEmitter:
         self._on_sink_error = on_sink_error
         self._critical_sinks: set[EventSink] = set()
         self._unhealthy_sinks: set[EventSink] = set()
+        self._critical_errors: dict[EventSink, Exception] = {}
 
     @property
     def sequence(self) -> int:
         return self._sequence
 
-    def subscribe(self, sink: EventSink, *, critical: bool = False) -> EventSink:
+    def subscribe(
+        self,
+        sink: EventSink,
+        *,
+        critical: bool = False,
+        prepend: bool = False,
+    ) -> EventSink:
         if sink not in self._sinks:
-            self._sinks.append(sink)
+            if prepend:
+                self._sinks.insert(0, sink)
+            else:
+                self._sinks.append(sink)
         if critical or bool(getattr(sink, "critical", False)):
             self._critical_sinks.add(sink)
         return sink
@@ -58,8 +68,31 @@ class EventEmitter:
         self._sequence += 1
         assigned: AgentEvent = replace(event, sequence=self._sequence)  # type: ignore[assignment]
         errors: list[tuple[EventSink, Exception, AgentEvent]] = []
-        for sink in tuple(self._sinks):
+        sinks = tuple(self._sinks)
+        # Critical sinks run first for terminal lifecycle events. If persistence
+        # fails, best-effort observers must not see a misleading terminal state.
+        if assigned.event_type in {
+            "model_completed",
+            "model_failed",
+            "tool_completed",
+            "tool_failed",
+            "turn_ended",
+            "run_finished",
+        }:
+            critical = tuple(sink for sink in sinks if sink in self._critical_sinks)
+            best_effort = tuple(sink for sink in sinks if sink not in self._critical_sinks)
+            sinks = critical + best_effort
+        for sink in sinks:
             if sink in self._unhealthy_sinks:
+                continue
+            if assigned.event_type in {
+                "model_completed",
+                "model_failed",
+                "tool_completed",
+                "tool_failed",
+                "turn_ended",
+                "run_finished",
+            } and sink not in self._critical_sinks and errors:
                 continue
             try:
                 sink(assigned)

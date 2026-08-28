@@ -130,3 +130,21 @@ class TestValidationCommandClassifier:
     )
     def test_reliable_validation_commands_are_classified(self, command):
         assert RunCommandTool.is_test_command(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "true || pytest",
+            "pytest & true",
+            "pytest\ntrue",
+        ],
+    )
+    def test_validation_cannot_be_skipped_or_masked(self, command):
+        assert not RunCommandTool.is_test_command(command)
+
+    def test_execution_path_does_not_mark_bypassed_validation(self, runtime, tool):
+        result = tool.execute(
+            {"command": "true || pytest", "timeout": 10}, runtime
+        )
+        assert result.success
+        assert not result.is_validation_failure

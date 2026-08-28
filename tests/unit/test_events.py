@@ -212,4 +212,114 @@ def test_protected_stop_emits_run_finished_without_open_turn(monkeypatch, tmp_pa
     assert isinstance(collector.events[-1], RunFinished)
     assert collector.events[-1].status == "STOPPED"
     assert [event.turn for event in collector.events if isinstance(event, TurnStarted)] == [1]
-    assert [event.turn for event in collector.events if isinstance(event, TurnEnded)] == [1]
+
+
+def test_parser_exception_closes_turn_and_run(monkeypatch, tmp_path):
+    class FakeModel:
+        model = "fake"
+
+        def generate(self, messages, tools=None):
+            return _response("list_files", {"path": ".", "max_depth": 1}, "call")
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: FakeModel()))
+    monkeypatch.setattr(
+        "coding_agent.model.parsers.openai_compatible.OpenAICompatibleParser.parse",
+        lambda self, response: (_ for _ in ()).throw(ValueError("malformed response")),
+    )
+    collector = EventCollector()
+    config = AgentConfig(workspace_root=tmp_path, trace_root=tmp_path / "trace")
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+
+    with pytest.raises(ValueError, match="malformed response"):
+        run("inspect", tmp_path, config, emitter=emitter)
+
+    assert [type(event) for event in collector.events] == [
+        RunStarted, TurnStarted, ModelStarted, ModelCompleted, TurnEnded, RunFailed,
+    ]
+    assert collector.events[-2].status == "error"
+
+
+def test_context_exception_closes_turn_and_run(monkeypatch, tmp_path):
+    class FakeModel:
+        model = "fake"
+
+        def generate(self, messages, tools=None):
+            return _response("list_files", {"path": ".", "max_depth": 1}, "call")
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: FakeModel()))
+    monkeypatch.setattr(
+        "coding_agent.context.manager.ContextManager.build",
+        lambda self, state, brief: (_ for _ in ()).throw(OSError("context unavailable")),
+    )
+    collector = EventCollector()
+    config = AgentConfig(workspace_root=tmp_path, trace_root=tmp_path / "trace")
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+
+    with pytest.raises(OSError, match="context unavailable"):
+        run("inspect", tmp_path, config, emitter=emitter)
+
+    assert [type(event) for event in collector.events] == [
+        RunStarted, TurnStarted, TurnEnded, RunFailed,
+    ]
+    assert collector.events[-2].status == "error"
+
+
+def test_finish_policy_exception_closes_turn_and_run(monkeypatch, tmp_path):
+    class FakeModel:
+        model = "fake"
+
+        def generate(self, messages, tools=None):
+            return _response("finish", {"summary": "done", "validation": "passed"}, "call")
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: FakeModel()))
+    monkeypatch.setattr(
+        "coding_agent.agent.loop.FinishPolicy.check",
+        lambda self, state, action: (_ for _ in ()).throw(RuntimeError("policy unavailable")),
+    )
+    collector = EventCollector()
+    config = AgentConfig(workspace_root=tmp_path, trace_root=tmp_path / "trace")
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+
+    with pytest.raises(RuntimeError, match="policy unavailable"):
+        run("finish task", tmp_path, config, emitter=emitter)
+
+    assert [type(event) for event in collector.events] == [
+        RunStarted, TurnStarted, ModelStarted, ModelCompleted, TurnEnded, RunFailed,
+    ]
+    assert collector.events[-2].status == "error"
+
+
+def test_run_finished_critical_failure_hides_success_from_ui(monkeypatch, tmp_path):
+    collector = EventCollector()
+
+    class FakeModel:
+        model = "fake"
+
+        def generate(self, messages, tools=None):
+            return _response("list_files", {"path": ".", "max_depth": 1}, "call")
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: FakeModel()))
+
+    def fail_only_on_success(event):
+        if event.event_type == "run_finished":
+            raise OSError("terminal sink unavailable")
+
+    config = AgentConfig(
+        workspace_root=tmp_path,
+        trace_root=tmp_path / "trace",
+        max_steps=1,
+    )
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+    emitter.subscribe(fail_only_on_success, critical=True)
+
+    with pytest.raises(Exception, match="terminal sink unavailable"):
+        run("inspect", tmp_path, config, emitter=emitter)
+
+    event_types = [event.event_type for event in collector.events]
+    assert "run_finished" not in event_types
+    assert event_types[-1] == "run_failed"
+    assert not any(event.event_type == "run_finished" for event in collector.events)

@@ -164,10 +164,10 @@ class RunCommandTool(Tool):
                 pending_operator = normalized[index:index + 2]
                 index += 2
                 continue
-            if char in ";|":
+            if char in ";|&\n":
                 parts.append(("".join(current).strip(), pending_operator))
                 current = []
-                pending_operator = char
+                pending_operator = ";" if char == "\n" else char
                 index += 1
                 continue
             current.append(char)
@@ -196,10 +196,14 @@ class RunCommandTool(Tool):
             return False
 
         first_validation = validation_indexes[0]
-        # A validation may be preceded by setup commands (``setup && pytest``),
-        # but once it starts, ';' and '||' can make a later command mask failure.
+        # A validation may be preceded only by reliable setup chaining.  If a
+        # prior ``||`` or background operator can skip/detach it, reject it.
+        for index, (_segment, operator) in enumerate(parts):
+            if index <= first_validation and operator in ("||", "&", ";"):
+                return False
+        # Once validation starts, any later command/status combinator can mask it.
         for _segment, operator in parts[first_validation + 1:]:
-            if operator in (";", "||"):
+            if operator in (";", "||", "&"):
                 return False
             if operator == "|":
                 # Plain pipelines report the last process' status.  Accept one
