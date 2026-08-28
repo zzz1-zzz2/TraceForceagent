@@ -4,6 +4,8 @@ from coding_agent.agent.state import AgentState, StopReason
 from coding_agent.agent.brief import TaskBrief, TaskMode
 from coding_agent.agent.loop import run, AgentRunResult
 from coding_agent.agent.termination import TerminationController
+from coding_agent.emitter import EventCollector, EventEmitter
+from coding_agent.events import BaseEvent
 
 __all__ = [
     "AgentState",
@@ -13,4 +15,7 @@ __all__ = [
     "run",
     "AgentRunResult",
     "TerminationController",
+    "BaseEvent",
+    "EventCollector",
+    "EventEmitter",
 ]

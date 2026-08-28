@@ -18,6 +18,17 @@ from coding_agent.agent.state import AgentState
 from coding_agent.agent.termination import TerminationConfig, TerminationController
 from coding_agent.config import AgentConfig
 from coding_agent.context.manager import ContextManager
+from coding_agent.emitter import EventEmitter
+from coding_agent.events import (
+    ModelCompleted,
+    ModelStarted,
+    RunFinished,
+    RunStarted,
+    ToolCompleted,
+    ToolStarted,
+    TurnEnded,
+    TurnStarted,
+)
 from coding_agent.model.client import ModelClient
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
 from coding_agent.model.types import FinishAction, ToolResult
@@ -40,7 +51,12 @@ class AgentRunResult:
     trajectory_path: Optional[Path] = None
 
 
-def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
+def run(
+    task: str,
+    workspace: Path,
+    config: AgentConfig,
+    emitter: EventEmitter | None = None,
+) -> AgentRunResult:
     """运行 Agent 完成一个编程任务。
 
     主入口。
@@ -50,6 +66,7 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
 
     start = time.time()
     run_id = f"run_{int(start)}_{uuid.uuid4().hex[:6]}"
+    events = emitter or EventEmitter()
 
     # 1. 初始化
     state = AgentState.initialize(
@@ -79,6 +96,7 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
         workspace=workspace,
         trace_root=config.trace_root,
     )
+    events.emit(RunStarted(run_id=run_id, task=task, workspace=str(workspace)))
 
     try:
         # 3. 主循环
@@ -90,6 +108,8 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                 break
 
             # 构造 messages
+            turn_number = state.step_count + 1
+            events.emit(TurnStarted(run_id=run_id, turn=turn_number))
             messages = context_manager.build(state, brief)
 
             # 如果有重复动作反馈，注入到 messages
@@ -101,6 +121,11 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                 })
 
             # 调用 LLM
+            events.emit(ModelStarted(
+                run_id=run_id,
+                turn=turn_number,
+                model=getattr(model_client, "model", ""),
+            ))
             response = model_client.generate(
                 messages=messages,
                 tools=registry.schemas(),
@@ -109,6 +134,12 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
             state.total_input_tokens += response.usage.input_tokens
             state.total_output_tokens += response.usage.output_tokens
             trajectory.record_model_call(state, response)
+            events.emit(ModelCompleted(
+                run_id=run_id,
+                turn=turn_number,
+                model=getattr(model_client, "model", ""),
+                response=response,
+            ))
 
             # 解析
             action = parser.parse(response)
@@ -123,6 +154,11 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                     state.consecutive_errors += 1
                     trajectory.record_feedback(state, fb_text)
                     state.mark_step_done()
+                    events.emit(TurnEnded(
+                        run_id=run_id,
+                        turn=turn_number,
+                        status="finish_rejected",
+                    ))
                     continue
                 state.mark_finished(
                     action.summary,
@@ -130,6 +166,7 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                     action.validation_skipped_reason,
                 )
                 trajectory.record_finish(state, action)
+                events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="finished"))
                 break
 
             # 1) InvalidAction：解析器已捕获错误（empty response / unknown tool / invalid args）
@@ -150,9 +187,17 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                 # 但 mark_step_done 仍需调用以保证 stagnation signature 推进。
                 state.mark_step_done()
                 # 不走下面的 dispatch / state 派生 / termination.record_action
+                events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="invalid"))
                 continue
 
             # 2) ToolAction：dispatch 到 Tool
+            events.emit(ToolStarted(
+                run_id=run_id,
+                turn=turn_number,
+                tool_name=action.tool_name,
+                action_id=action.action_id,
+                arguments=action.arguments,
+            ))
             tool = registry.get(action.tool_name)
             if tool is None:
                 # 未知 tool 优雅降级，告诉模型有哪些可用 tool
@@ -183,6 +228,13 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
 
             # 记录 + 更新状态
             trajectory.record_tool_call(state, action, observation)
+            events.emit(ToolCompleted(
+                run_id=run_id,
+                turn=turn_number,
+                tool_name=action.tool_name,
+                action_id=action.action_id,
+                result=observation,
+            ))
             state.step_count += 1
             state.tool_calls += 1
             state.record_action(action.tool_name, action.args_hash)
@@ -242,8 +294,14 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
 
             # 记录 step 状态指纹（stagnation 检测用）
             state.mark_step_done()
+            events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="completed"))
 
     finally:
+        events.emit(RunFinished(
+            run_id=run_id,
+            status=state.status,
+            reason=state.stop_reason.value if state.stop_reason else "unknown",
+        ))
         trajectory.close()
 
     return AgentRunResult(
