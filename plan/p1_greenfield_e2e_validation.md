@@ -127,8 +127,18 @@ Agent 的 mutation 序列：
 ✅ **stop_reason=finish** — Agent 主动 finish，不是 max_steps / 错误终止
 ✅ **Trajectory 完整保存** — 34 events JSONL 落盘
 
-## 5. 后续动作（已规划）
+## 5. 稳定性抽样（3/3 全成功）
 
-- [ ] P1-7 稳定性抽样：再跑 2 次 E_todo_cli，目标 ≥2/3 成功
+| Run | Steps | Stop | Tests | 文件数 | tokens | 结构 |
+| --- | --- | --- | --- | --- | --- | --- |
+| #1 | 16 | `finish` ✅ | 11 passed | 5（core/cli/`__main__`/`__init__`/test）| 74,390 | split into core + cli |
+| #2 | 16 | `finish` ✅ | 13 passed | 3（`__init__`/`__main__`/test）| 84,110 | logic in `__init__`, CLI in `__main__` |
+| #3 | 11 | `finish` ✅ | 14 passed | 3（`__init__`/`__main__`/test）| 50,224 | logic + CLI in `__main__` |
+
+**3/3 全部成功**（目标 2/3），Agent 在每次都自主选择了不同的文件组织方式，但都满足 task.md 的硬性需求：4 子命令、JSON 持久化、pytest、`python -m todo` 运行。
+
+## 6. 后续动作
+
+- [ ] P1-7 稳定性抽样：**已完成（3/3）** ✅
 - [ ] P1-8 CI：GitHub Actions 工作流，跑 `pytest tests/` 必须保持全绿
 - [ ] P1-9 冻结 P1 Core，开始 P2：Event Bus / Streaming / TUI / Steering
