@@ -74,7 +74,11 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
     ))
     finish_policy = FinishPolicy()
     failure_refresher = FailureAwareRefresher(enabled=config.enable_failure_refresh)
-    trajectory = TrajectoryLogger(run_id=run_id, workspace=workspace)
+    trajectory = TrajectoryLogger(
+        run_id=run_id,
+        workspace=workspace,
+        trace_root=config.trace_root,
+    )
 
     try:
         # 3. 主循环

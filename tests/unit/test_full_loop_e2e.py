@@ -100,7 +100,9 @@ def fake_workspace(tmp_path):
 
 
 @pytest.fixture
-def config(fake_workspace):
+def config(fake_workspace, tmp_path):
+    # P1-4：trajectory 写到 tmp_path/trace/ 而不是 workspace/runs/，
+    # 旧测试改从 result.trajectory_path 读取。
     return AgentConfig(
         context_budget=8000,
         recent_turns=4,
@@ -109,6 +111,7 @@ def config(fake_workspace):
         max_wall_time=60,
         command_timeout=30,
         workspace_root=fake_workspace,
+        trace_root=tmp_path / "trace",
     )
 
 
@@ -167,9 +170,7 @@ class TestHappyPath:
 
         # state.modified_files 反映了 apply_patch
         # （通过 trajectory 间接验证：record_tool_call 应当包含 hello.py）
-        run_dirs = list((fake_workspace / "runs").glob("run_*"))
-        assert run_dirs
-        traj_path = run_dirs[-1] / "trajectory.jsonl"
+        traj_path = result.trajectory_path
         with traj_path.open() as f:
             events = [json.loads(line) for line in f if line.strip()]
 
@@ -272,8 +273,7 @@ class TestIntegrationRealWorld:
         assert (fake_workspace / "a.py").exists()
         assert (fake_workspace / "b.py").exists()
         # trajectory 记录了两次 mutation
-        run_dirs = list((fake_workspace / "runs").glob("run_*"))
-        traj_path = run_dirs[-1] / "trajectory.jsonl"
+        traj_path = result.trajectory_path
         events = [json.loads(line) for line in traj_path.open() if line.strip()]
         tool_events = [e for e in events if e["type"] == "tool_call"]
         mutated = {e["args"]["path"] for e in tool_events
@@ -307,8 +307,7 @@ class TestIntegrationRealWorld:
         # 由于 FakeModel.last_messages 在每次 _generate 时被覆盖，
         # 我们用 model_calls 计数间接验证（每次 generate 都收到 messages）
         # 真实验证：读 trajectory 中的 model_call 事件
-        run_dirs = list((fake_workspace / "runs").glob("run_*"))
-        traj_path = run_dirs[-1] / "trajectory.jsonl"
+        traj_path = result.trajectory_path
         events = [json.loads(line) for line in traj_path.open() if line.strip()]
         model_calls = [e for e in events if e["type"] == "model_call"]
         # 5 次调用：read_file + apply_patch + pytest + finish + 最后一次（finish 通过）

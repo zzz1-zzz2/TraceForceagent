@@ -1,6 +1,9 @@
 """TrajectoryLogger：把 Agent 事件写入 JSONL。
 
-每次 Run 输出到 runs/run_<id>/trajectory.jsonl。
+P1-4：轨迹文件写到 ~/.traceforce/runs/<workspace-basename>/run_<id>/trajectory.jsonl,
+不再写到 workspace/runs/,避免污染目标 repo。
+
+可以通过 env `TRACE_ROOT=...` 或在构造时显式传 trace_root 来覆盖根目录。
 """
 
 from __future__ import annotations
@@ -10,7 +13,12 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
+
+
+def _default_trace_root() -> Path:
+    """默认 ~/.traceforce/runs/。"""
+    return Path.home() / ".traceforce" / "runs"
 
 
 class TrajectoryLogger:
@@ -19,12 +27,25 @@ class TrajectoryLogger:
     每个 event 至少包含：
     - event_id, step, timestamp, type
     - 额外字段按 type 不同而不同
+
+    P1-4 路径布局：
+        <trace_root>/<workspace_basename>/<run_id>/trajectory.jsonl
+
+    其中 workspace_basename 用于把不同 repo 的 run 分开。
     """
 
-    def __init__(self, run_id: str, workspace: Path):
+    def __init__(
+        self,
+        run_id: str,
+        workspace: Path,
+        trace_root: Optional[Path] = None,
+    ):
         self.run_id = run_id
         self.workspace = workspace
-        self.run_dir = workspace / "runs" / run_id
+        root = trace_root or _default_trace_root()
+        # 按 workspace 名字分桶,避免不同 repo 的 run 混在一个目录里
+        ws_name = workspace.resolve().name or "default"
+        self.run_dir = root / ws_name / run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.run_dir / "trajectory.jsonl"
         self._file = self.path.open("a", encoding="utf-8")

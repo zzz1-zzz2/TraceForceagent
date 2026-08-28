@@ -232,18 +232,15 @@ class TestInvalidActionTrajectory:
         # 注意：finish 在没 mutation 时被 reject，所以这里也走 max_consecutive_errors 路径。
         # 我们直接验证 trajectory 文件存在并包含 model_call 事件。
         monkeypatch_model([_empty_response() for _ in range(5)])
-        agent_run(
+        result = agent_run(
             task="trajectory test",
             workspace=workspace,
             config=config,
         )
 
         import json
-        from pathlib import Path
-
-        run_dirs = list((workspace / "runs").glob("run_*"))
-        assert run_dirs, "应当产生 trajectory 目录"
-        traj_path = run_dirs[-1] / "trajectory.jsonl"
+        # P1-4: trajectory 走 ~/.traceforce/runs/,从 result 直接拿路径
+        traj_path = result.trajectory_path
         assert traj_path.exists()
 
         events = []

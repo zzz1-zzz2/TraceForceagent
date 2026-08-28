@@ -53,6 +53,11 @@ class AgentConfig(BaseSettings):
     # --- Workspace ---
     workspace_root: Path = Field(default=Path("./workspace"))
 
+    # --- 轨迹日志 ---
+    # 默认放在 ~/.traceforce/runs/ 而不是 workspace/runs/，
+    # 避免污染目标 repo。可通过 env `TRACE_ROOT=...` 覆盖。
+    trace_root: Path = Field(default=Path.home() / ".traceforce" / "runs")
+
 
 def load_config() -> AgentConfig:
     """加载配置：优先 .env，其次环境变量。"""

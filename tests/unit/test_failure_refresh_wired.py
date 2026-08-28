@@ -68,7 +68,7 @@ class TestRefresherInLoop:
         return workspace
 
     @pytest.fixture
-    def config(self, fake_workspace):
+    def config(self, fake_workspace, tmp_path):
         return AgentConfig(
             context_budget=8000,
             recent_turns=4,
@@ -77,6 +77,7 @@ class TestRefresherInLoop:
             max_wall_time=30,
             command_timeout=15,
             workspace_root=fake_workspace,
+            trace_root=tmp_path / "trace",
             enable_failure_refresh=True,
         )
 
@@ -164,10 +165,9 @@ class TestRefresherInLoop:
         # finish 被拒绝（validation fail），max_consecutive_errors 触发 stop
         assert result.stop_reason != "finish"
 
-        # 验证 trajectory 记录了 validation_failure=True 的 tool_call
+        # P1-4：trajectory 路径走 result.trajectory_path,不再读 workspace/runs
+        traj_path = result.trajectory_path
         import json
-        run_dirs = list((fake_workspace / "runs").glob("run_*"))
-        traj_path = run_dirs[-1] / "trajectory.jsonl"
         events = [json.loads(l) for l in traj_path.open() if l.strip()]
         tool_events = [e for e in events if e["type"] == "tool_call"]
         # 第二个 tool_call 是 pytest 失败的，应当 is_validation_failure=True
@@ -177,8 +177,11 @@ class TestRefresherInLoop:
         # 验证 summary 是 FAIL 形式
         assert pytest_event["result_summary"].startswith("FAIL:")
 
+        # workspace 干净,没有 runs/
+        assert not (fake_workspace / "runs").exists()
+
     def test_refresher_disabled_passes_full_observation(
-        self, fake_workspace, patch_model, monkeypatch
+        self, fake_workspace, patch_model, tmp_path
     ):
         """enable_failure_refresh=False 时不调用 refresher，保留完整 traceback。"""
         from coding_agent.agent.loop import run as agent_run
@@ -192,6 +195,7 @@ class TestRefresherInLoop:
             max_wall_time=30,
             command_timeout=15,
             workspace_root=fake_workspace,
+            trace_root=tmp_path / "trace",
             enable_failure_refresh=False,
         )
 
@@ -220,10 +224,9 @@ class TestRefresherInLoop:
             config=config,
         )
 
-        # 应当 fail 且未触发 refresh
+        # P1-4：从 result.trajectory_path 读
+        traj_path = result.trajectory_path
         import json
-        run_dirs = list((fake_workspace / "runs").glob("run_*"))
-        traj_path = run_dirs[-1] / "trajectory.jsonl"
         events = [json.loads(l) for l in traj_path.open() if l.strip()]
         tool_events = [e for e in events if e["type"] == "tool_call"]
         pytest_event = next(e for e in tool_events if e["tool"] == "run_command")
