@@ -283,3 +283,77 @@ class TestBudgetCountingCorrectness:
         for m in messages:
             tok = cm._count_message_tokens(m)
             assert tok > 0  # 每条都 > 0
+
+
+class TestToolTurnAtomicity:
+    """P1-4 修复：(assistant tool_call, tool_result) 必须成对进或成对出。
+
+    不变量：
+    - 任何 assistant message 含 tool_calls 时，紧跟其后必须有对应 tool message
+    - 否则 OpenAI API 会报"messages with role 'tool' must be a response to a preceeding tool_calls"
+    """
+
+    def _tool_call_ids(self, messages):
+        """提取每条 message 的 tool_call_id（assistant 用 tool_calls[0].id, tool 用 tool_call_id）。"""
+        ids = []
+        for m in messages:
+            if m.get("role") == "assistant":
+                for tc in m.get("tool_calls", []):
+                    ids.append(("assistant", tc.get("id")))
+            elif m.get("role") == "tool":
+                ids.append(("tool", m.get("tool_call_id")))
+        return ids
+
+    def test_no_orphan_assistant_tool_call_when_budget_tight(self, tmp_path):
+        """预算紧张时,turn bundle 要么成对进,要么成对出,不留 orphan assistant。"""
+        # budget 紧到只能容纳 1 个 turn bundle;P0+P1 + 第一个 turn 后预算耗尽
+        cm = _cm(budget=400, recent_turns=4)
+        state = _state(tmp_path)
+        # 4 个 turn,每个 tool_result 比较长
+        _add_observations(cm, state, n=4, content_size=80)
+
+        brief = TaskBrief.from_user_task(state.original_task)
+        messages = cm.build(state, brief)
+
+        # 检查 assistant/tool 配对：每对 assistant 后面必须紧跟对应 tool
+        ids = self._tool_call_ids(messages)
+        assistant_ids = [i for r, i in ids if r == "assistant"]
+        tool_ids = [i for r, i in ids if r == "tool"]
+        # 进入 context 的 assistant tool_call id 必须在 tool_ids 里都出现
+        for aid in assistant_ids:
+            assert aid in tool_ids, \
+                f"orphan assistant tool_call id {aid} has no matching tool message"
+
+    def test_turn_bundle_dropped_when_single_message_would_exceed(self, tmp_path):
+        """单个 turn 大到 assistant 或 tool 任一超 budget 时,bundle 一起丢。"""
+        # budget 极小,任何 turn 都装不下
+        cm = _cm(budget=50, recent_turns=2)
+        state = _state(tmp_path)
+        # content_size=80 远超 budget
+        _add_observations(cm, state, n=1, content_size=80)
+
+        brief = TaskBrief.from_user_task(state.original_task)
+        messages = cm.build(state, brief)
+
+        # 不应当出现 role=tool 的 message（turn bundle 整体被丢）
+        tool_msgs = [m for m in messages if m.get("role") == "tool"]
+        assistant_with_calls = [
+            m for m in messages if m.get("role") == "assistant" and m.get("tool_calls")
+        ]
+        assert not tool_msgs, "turn bundle 应整体被丢"
+        assert not assistant_with_calls, "不应留下 orphan assistant tool_call"
+
+    def test_turn_pair_always_complete(self, tmp_path):
+        """正常预算下,每个 assistant tool_call 都有对应 tool message。"""
+        cm = _cm(budget=20000, recent_turns=5)
+        state = _state(tmp_path)
+        _add_observations(cm, state, n=3, content_size=100)
+
+        brief = TaskBrief.from_user_task(state.original_task)
+        messages = cm.build(state, brief)
+
+        ids = self._tool_call_ids(messages)
+        assistant_ids = [i for r, i in ids if r == "assistant"]
+        tool_ids = [i for r, i in ids if r == "tool"]
+        assert len(assistant_ids) == len(tool_ids)
+        assert set(assistant_ids) == set(tool_ids)

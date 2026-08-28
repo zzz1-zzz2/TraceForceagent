@@ -43,6 +43,18 @@ class _RecentTurn:
     tool_result_success: bool
 
 
+@dataclass
+class _TurnBundle:
+    """一个 tool turn 的不可拆分 bundle：(assistant tool_call, tool_result)。
+
+    预算裁剪时作为一个整体处理：要么两条都进，要么两条都不进。
+    防止出现 orphan assistant tool_call 破坏 OpenAI tool calling 的不变量。
+    """
+
+    assistant: dict
+    tool: dict
+
+
 class ContextManager:
     """管理 Active Context 的构造与裁剪。
 
@@ -149,35 +161,39 @@ Workspace path boundary: You cannot escape the workspace directory."""
             }))
 
         # P2: Recent Interaction（按添加顺序，前面的较低优先级）
+        # 关键修复 (P1-4)：tool turn = (assistant tool_call, tool_result) 是一对
+        # 不可拆分的单元。必须两条都进入 Context，或两条都淘汰。
+        # 否则保留 orphan assistant tool_call 会破坏 OpenAI tool calling 的不变量。
         recent = list(self._recent_turns)[-self.config.recent_turns:]
         for idx, turn in enumerate(recent):
             # 越近的越优先 P2，越远的降为 P3
             priority = "P2" if idx >= len(recent) - 3 else "P3"
-            candidates.append((
-                priority,
-                {
-                    "role": "assistant",
-                    "content": turn.assistant_content or "",
-                    "tool_calls": [
-                        {
-                            "id": turn.tool_call_id,
-                            "type": "function",
-                            "function": {
-                                "name": turn.tool_call_name,
-                                "arguments": _json_dumps(turn.tool_call_args),
-                            },
-                        }
-                    ],
-                },
-            ))
-            candidates.append((
-                priority,
-                {
-                    "role": "tool",
-                    "tool_call_id": turn.tool_call_id,
-                    "content": turn.tool_result_content,
-                },
-            ))
+            # 把一个 turn 包成 list[tuple[prio, msg]]，后面整体计算 token
+            candidates.append((priority, _TurnBundle(
+                assistant=(
+                    {
+                        "role": "assistant",
+                        "content": turn.assistant_content or "",
+                        "tool_calls": [
+                            {
+                                "id": turn.tool_call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": turn.tool_call_name,
+                                    "arguments": _json_dumps(turn.tool_call_args),
+                                },
+                            }
+                        ],
+                    }
+                ),
+                tool=(
+                    {
+                        "role": "tool",
+                        "tool_call_id": turn.tool_call_id,
+                        "content": turn.tool_result_content,
+                    }
+                ),
+            )))
 
         # 2) 按 token 预算淘汰
         messages = self._pack_by_budget(candidates)
@@ -185,7 +201,7 @@ Workspace path boundary: You cannot escape the workspace directory."""
         return messages
 
     def _pack_by_budget(
-        self, candidates: list[tuple[str, dict]]
+        self, candidates: list[tuple[str, Any]]
     ) -> list[dict[str, Any]]:
         """按优先级打包，**硬保证**总 token 数不超过 budget。
 
@@ -196,6 +212,11 @@ Workspace path boundary: You cannot escape the workspace directory."""
           时打 warning 并截断内容，但仍保留
         - 这是 hard cap：返回的消息总 token 数 <= context_budget（除 P0 截断 case）
 
+        Turn bundle 处理 (P1-4 修复)：
+        - `_TurnBundle` 是一个 (assistant, tool) 对，打包成 list 提交预算
+        - bundle 总 token = assistant_token + tool_token + 4 (overhead)
+        - 任一条单独算都超 budget 时，bundle 一起丢，不留 orphan assistant
+
         与旧版区别：
         - 旧版 "80% 阈值" 魔法数被删除
         - 旧版 P2 用 break 会跳过 P3，现在按顺序公平累加
@@ -205,7 +226,23 @@ Workspace path boundary: You cannot escape the workspace directory."""
         total = 0
         selected: list[dict] = []
 
-        for prio, msg in candidates:
+        for prio, payload in candidates:
+            # Turn bundle: 整对一起算 token，一起进 / 一起丢
+            if isinstance(payload, _TurnBundle):
+                bundle_msgs = [payload.assistant, payload.tool]
+                bundle_tok = sum(self._count_message_tokens(m) for m in bundle_msgs)
+                if total + bundle_tok > budget:
+                    _log.debug(
+                        f"ContextManager: dropping turn bundle "
+                        f"({bundle_tok} tokens would exceed {total}/{budget})"
+                    )
+                    continue
+                total += bundle_tok
+                selected.extend(bundle_msgs)
+                continue
+
+            # 普通单条 message
+            msg = payload
             tok = self._count_message_tokens(msg)
             if total + tok > budget:
                 if prio == "P0":
