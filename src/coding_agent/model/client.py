@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+import httpx2 as _httpx
 from openai import APIError, APITimeoutError, OpenAI, RateLimitError
 
 from coding_agent.config import AgentConfig
@@ -32,13 +33,25 @@ class ModelClient:
         model: str,
         temperature: float = 0.0,
         max_retries: int = 3,
+        proxy: str | None = None,
     ):
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
         self.temperature = temperature
         self.max_retries = max_retries
-        self._client = OpenAI(api_key=api_key, base_url=base_url, max_retries=0)
+
+        # 默认禁用 httpx 的 env proxy 读取
+        # 原因：很多用户 shell 中配置了 socks:// 之类不被 httpx 认识的 proxy scheme，
+        # 会导致 "Unknown scheme for proxy URL" 错误。
+        # 如需走代理访问 API，请显式传 proxy= 参数（如 "http://127.0.0.1:7890"）。
+        http_client = _httpx.Client(trust_env=False, proxy=proxy)
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=0,
+            http_client=http_client,
+        )
 
     @classmethod
     def from_config(cls, config: AgentConfig) -> "ModelClient":
@@ -106,6 +119,24 @@ class ModelClient:
                 raise
 
         raise RuntimeError(f"ModelClient failed after {self.max_retries} retries: {last_err}")
+
+    def chat(
+        self,
+        messages: list[dict],
+        max_tokens: int = 500,
+        temperature: float | None = None,
+    ) -> str:
+        """纯对话模式（不传 tools）。
+
+        适用于闲聊 / 问答 / 解释类任务，不进入 Agent 工具循环。
+        """
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=self.temperature if temperature is None else temperature,
+        )
+        return resp.choices[0].message.content or ""
 
     def _parse_response(self, resp: Any) -> ModelResponse:
         """把 OpenAI SDK 响应归一为 ModelResponse。"""

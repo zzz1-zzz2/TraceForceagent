@@ -84,8 +84,21 @@ def run(
     workspace.mkdir(parents=True, exist_ok=True)
     config.workspace_root = workspace.resolve()
 
+    # Fallback：pydantic-settings 不会自动把 DEEPSEEK_API_KEY 映射到 api_key 字段
+    # 这里与 ModelClient.from_config 保持一致，从常见 env var 读取
     if not config.api_key:
-        console.print("[red]未配置 API key，请设置 .env 中的 DEEPSEEK_API_KEY[/red]")
+        import os as _os
+        config.api_key = (
+            _os.environ.get("DEEPSEEK_API_KEY")
+            or _os.environ.get("OPENAI_API_KEY")
+            or _os.environ.get("GLM_API_KEY")
+            or _os.environ.get("QWEN_API_KEY")
+            or _os.environ.get("KIMI_API_KEY")
+            or ""
+        )
+
+    if not config.api_key:
+        console.print("[red]未配置 API key，请设置 .env 中的 DEEPSEEK_API_KEY 或 export DEEPSEEK_API_KEY=xxx[/red]")
         raise typer.Exit(1)
 
     # 运行

@@ -29,6 +29,8 @@ ENV/
 runs/*
 !runs/.gitkeep
 !runs/.gitignore
+workspace/
+!workspace/.gitkeep
 
 # 评测结果
 eval/results/*
