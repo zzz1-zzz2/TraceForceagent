@@ -21,6 +21,7 @@ from coding_agent.context.manager import ContextManager
 from coding_agent.model.client import ModelClient
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
 from coding_agent.model.types import FinishAction, ToolResult
+from coding_agent.recovery.failure_refresh import FailureAwareRefresher
 from coding_agent.tools.registry import default_registry
 from coding_agent.trajectory.logger import TrajectoryLogger
 from coding_agent.runtime.local import LocalRuntime
@@ -72,6 +73,7 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
         max_wall_time=config.max_wall_time,
     ))
     finish_policy = FinishPolicy()
+    failure_refresher = FailureAwareRefresher(enabled=config.enable_failure_refresh)
     trajectory = TrajectoryLogger(run_id=run_id, workspace=workspace)
 
     try:
@@ -155,6 +157,9 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
             else:
                 try:
                     observation = tool.execute(action.arguments, runtime)
+                    # FailureAwareRefresher: 测试失败时把几百行 traceback
+                    # 压缩成 ~5 行 snapshot，减少 Active Context 占用。
+                    observation = failure_refresher.maybe_refresh(state, observation)
                     if observation.success:
                         state.consecutive_errors = 0
                     else:
