@@ -1,5 +1,6 @@
 """Shell tool 单元测试：timeout / 正常退出 / 测试失败。"""
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,10 @@ from coding_agent.config import AgentConfig
 from coding_agent.model.types import ToolResult
 from coding_agent.runtime.local import LocalRuntime
 from coding_agent.tools.shell import RunCommandTool
+
+
+# 用 sys.executable 而不是裸 "python" —— 后者在 venv / Docker 等环境里未必在 PATH。
+PY = sys.executable
 
 
 @pytest.fixture
@@ -41,7 +46,7 @@ class TestRunCommandSuccess:
 class TestRunCommandFailure:
     def test_nonzero_exit_is_not_validation_failure(self, runtime, tool):
         result = tool.execute(
-            {"command": "python -c 'import sys; sys.exit(1)'", "timeout": 10},
+            {"command": f"{PY} -c 'import sys; sys.exit(1)'", "timeout": 10},
             runtime,
         )
         assert not result.success
@@ -50,8 +55,9 @@ class TestRunCommandFailure:
 
     def test_pytest_failure_marked_as_validation_failure(self, runtime, tool):
         """pytest 失败应标记 is_validation_failure=True。"""
+        # 故意选个不存在的测试，确保 pytest 正常 exit 但状态失败
         result = tool.execute(
-            {"command": "python -m pytest nonexistent_test", "timeout": 30},
+            {"command": f"{PY} -m pytest nonexistent_test_xyz", "timeout": 30},
             runtime,
         )
         assert not result.success

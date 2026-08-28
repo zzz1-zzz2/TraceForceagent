@@ -83,19 +83,26 @@ class RunCommandTool(Tool):
                 is_validation_failure=False,
             )
 
-        # 命令未找到检测：只匹配具体的命令未找到消息，避免误判 pytest 输出
+        # 命令未找到检测：匹配 POSIX / bash / zsh / cmd / powershell 的"未找到"消息
+        # 必须放在 exit_code 127 之前，因为 127 还可能匹配 shell 自身错误（如 /bin/sh 找不到）
         not_found_patterns = [
             "command not found",                    # bash / zsh
+            ": not found",                          # POSIX sh (e.g. "/bin/sh: 1: python: not found")
             "is not recognized as",                  # Windows cmd
             "不是内部或外部命令",                     # Windows cmd (Chinese)
             "无法识别",                              # Windows PowerShell
             "no such file or directory",             # 直接执行二进制找不到
         ]
         lower_output = output.lower()
-        if any(pat in lower_output for pat in not_found_patterns):
+        is_not_found = (
+            result.exit_code == 127
+            or any(pat in lower_output for pat in not_found_patterns)
+        )
+        if is_not_found:
             return ToolResult.fail(
                 f"$ {command}\n\n{output}\n(executable not found)",
                 is_runtime_error=True,
+                is_validation_failure=False,
             )
 
         # 普通程序失败（exit != 0 但命令成功执行）—— 视为 validation failure
