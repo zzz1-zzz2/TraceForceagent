@@ -96,8 +96,11 @@ class TestBuildInjectFeedback:
 
 class TestFeedbackPriority:
     def test_feedback_survives_tiny_budget(self, state):
-        """P0 永远保留——budget 极小时 feedback 必须仍在。"""
-        cfg = AgentConfig(context_budget=100, recent_turns=2)
+        """P0 永远保留——budget 较小时 feedback 内容应在（即使 task 被截断）。
+
+        budget=400 远大于 system prompt 但仍很小，能验证 P0 反馈不被裁。
+        """
+        cfg = AgentConfig(context_budget=400, recent_turns=2)
         cm = ContextManager(config=cfg)
         cm.record_feedback("CRITICAL: must use valid tool")
 

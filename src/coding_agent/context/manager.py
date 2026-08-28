@@ -171,55 +171,100 @@ Workspace path boundary: You cannot escape the workspace directory."""
     def _pack_by_budget(
         self, candidates: list[tuple[str, dict]]
     ) -> list[dict[str, Any]]:
-        """按优先级打包，超出 budget 时从 P3 → P2 → P1 淘汰。"""
+        """按优先级打包，**硬保证**总 token 数不超过 budget。
+
+        设计要点：
+        - 优先级 P0 > P1 > P2 > P3，按出现顺序累加
+        - 每一条消息都精确计数；超过 budget 的非 P0 消息**跳过**
+        - P0 消息（system / task / feedback）**永不丢弃**——单条超过 budget
+          时打 warning 并截断内容，但仍保留
+        - 这是 hard cap：返回的消息总 token 数 <= context_budget（除 P0 截断 case）
+
+        与旧版区别：
+        - 旧版 "80% 阈值" 魔法数被删除
+        - 旧版 P2 用 break 会跳过 P3，现在按顺序公平累加
+        - 旧版 P0/P1 全装（可能爆 budget），现在 P1 受 budget 限制
+        """
         budget = self.config.context_budget
-        # 80% 触发阈值：先把所有 P0/P1 都加进去，然后判断
         total = 0
         selected: list[dict] = []
-        # 优先放 P0
-        for prio, msg in candidates:
-            if prio == "P0":
-                tok = self._count_message_tokens(msg)
-                total += tok
-                selected.append(msg)
-
-        # 再放 P1
-        for prio, msg in candidates:
-            if prio == "P1":
-                tok = self._count_message_tokens(msg)
-                total += tok
-                selected.append(msg)
-
-        # 80% 触发线以下，全部装入
-        if total < budget * 0.8:
-            for prio, msg in candidates:
-                if prio in ("P2", "P3"):
-                    selected.append(msg)
-            return selected
-
-        # 触发淘汰
-        # 先装 P2，再 P3，到 budget 停止
-        for prio, msg in candidates:
-            if prio == "P2":
-                tok = self._count_message_tokens(msg)
-                if total + tok > budget:
-                    break
-                total += tok
-                selected.append(msg)
 
         for prio, msg in candidates:
-            if prio == "P3":
-                tok = self._count_message_tokens(msg)
-                if total + tok > budget:
-                    continue  # skip
-                total += tok
-                selected.append(msg)
+            tok = self._count_message_tokens(msg)
+            if total + tok > budget:
+                if prio == "P0":
+                    # P0 不能丢：截断到剩余 budget 后保留
+                    remaining = max(1, budget - total)
+                    _log.warning(
+                        f"ContextManager: P0 message alone ({tok} tokens) "
+                        f"exceeds remaining budget ({total}/{budget}). "
+                        f"Truncating to {remaining} tokens."
+                    )
+                    msg = self._truncate_message_to_budget(msg, remaining)
+                    tok = self._count_message_tokens(msg)
+                    if tok > remaining:
+                        # 即使截断也超（极少见：仅 message overhead 太多）—— still 放入
+                        _log.warning(
+                            f"ContextManager: truncated P0 still {tok} > "
+                            f"remaining {remaining}; will overflow budget"
+                        )
+                else:
+                    _log.debug(
+                        f"ContextManager: skipping {prio} message "
+                        f"({tok} tokens would exceed {total}/{budget})"
+                    )
+                    continue
+            total += tok
+            selected.append(msg)
+
+        # 强约束：除 P0 截断外，总 token 必须 <= budget
+        if total > budget:
+            _log.warning(
+                f"ContextManager: final total {total} > budget {budget} "
+                f"(due to P0 retention; this is acceptable)"
+            )
 
         _log.info(
             f"ContextManager: packed {len(selected)}/{len(candidates)} messages, "
             f"{total}/{budget} tokens"
         )
         return selected
+
+    def _truncate_message_to_budget(self, msg: dict, budget: int) -> dict:
+        """截断单条 message 的 content 使其 token 数 <= budget。
+
+        budget 是该消息**整体**的预算（含 4 token message overhead）。
+        content 截断目标 = budget - 4。
+
+        仅在 P0 消息单条超过剩余 budget 时调用——罕见（system / task / feedback
+        通常远小于 budget）。截断是保底策略，避免完全丢失。
+        """
+        import copy
+
+        msg = copy.deepcopy(msg)
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            return msg
+
+        # 给 message overhead 留余量
+        content_budget = max(0, budget - 4)
+
+        # 二分查找最长可保留前缀
+        lo, hi = 0, len(content)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            tok = self._count_tokens(content[:mid])
+            if tok <= content_budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        truncated = content[:lo]
+        msg["content"] = (
+            truncated + "\n\n[... truncated by ContextManager ...]"
+            if truncated
+            else "[... message exceeded budget; content dropped ...]"
+        )
+        return msg
 
     def record_observation(
         self,
