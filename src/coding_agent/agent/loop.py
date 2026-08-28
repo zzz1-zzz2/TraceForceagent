@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from coding_agent.agent.brief import TaskBrief, TaskMode
 from coding_agent.agent.finish_policy import FinishPolicy, classify_validation
@@ -21,10 +20,14 @@ from coding_agent.context.manager import ContextManager
 from coding_agent.emitter import EventEmitter
 from coding_agent.events import (
     ModelCompleted,
+    ModelFailed,
+    ModelResponseSnapshot,
     ModelStarted,
+    RunFailed,
     RunFinished,
     RunStarted,
     ToolCompleted,
+    ToolResultSnapshot,
     ToolStarted,
     TurnEnded,
     TurnStarted,
@@ -33,9 +36,9 @@ from coding_agent.model.client import ModelClient
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
 from coding_agent.model.types import FinishAction, ToolResult
 from coding_agent.recovery.failure_refresh import FailureAwareRefresher
+from coding_agent.runtime.local import LocalRuntime
 from coding_agent.tools.registry import default_registry
 from coding_agent.trajectory.logger import TrajectoryLogger
-from coding_agent.runtime.local import LocalRuntime
 
 
 @dataclass
@@ -48,7 +51,7 @@ class AgentRunResult:
     steps: int
     total_tokens: int
     duration: float
-    trajectory_path: Optional[Path] = None
+    trajectory_path: Path | None = None
 
 
 def run(
@@ -56,6 +59,7 @@ def run(
     workspace: Path,
     config: AgentConfig,
     emitter: EventEmitter | None = None,
+    task_mode: TaskMode | str | None = None,
 ) -> AgentRunResult:
     """运行 Agent 完成一个编程任务。
 
@@ -67,6 +71,7 @@ def run(
     start = time.time()
     run_id = f"run_{int(start)}_{uuid.uuid4().hex[:6]}"
     events = emitter or EventEmitter()
+    turn_number = 0
 
     # 1. 初始化
     state = AgentState.initialize(
@@ -74,7 +79,7 @@ def run(
         workspace=workspace,
         task_mode=TaskMode.EXISTING_REPOSITORY.value,  # 占位，下一行立刻覆盖
     )
-    brief = TaskBrief.from_user_task(task, workspace=workspace)
+    brief = TaskBrief.from_user_task(task, task_mode=task_mode, workspace=workspace)
     # TaskMode 单源：以 brief 的判定为准
     state.task_mode = brief.task_mode.value
 
@@ -103,12 +108,14 @@ def run(
         while True:
             should_stop, stop_reason, feedback = termination.should_stop(state)
             if should_stop:
+                if stop_reason is None:
+                    raise RuntimeError("termination requested without a stop reason")
                 state.mark_stopped(stop_reason)
                 trajectory.record_stop(state, stop_reason.value)
                 break
 
             # 构造 messages
-            turn_number = state.step_count + 1
+            turn_number += 1
             events.emit(TurnStarted(run_id=run_id, turn=turn_number))
             messages = context_manager.build(state, brief)
 
@@ -126,10 +133,21 @@ def run(
                 turn=turn_number,
                 model=getattr(model_client, "model", ""),
             ))
-            response = model_client.generate(
-                messages=messages,
-                tools=registry.schemas(),
-            )
+            try:
+                response = model_client.generate(
+                    messages=messages,
+                    tools=registry.schemas(),
+                )
+            except Exception as exc:
+                events.emit(ModelFailed(
+                    run_id=run_id,
+                    turn=turn_number,
+                    model=getattr(model_client, "model", ""),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                ))
+                events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="error"))
+                raise
             state.model_calls += 1
             state.total_input_tokens += response.usage.input_tokens
             state.total_output_tokens += response.usage.output_tokens
@@ -138,7 +156,7 @@ def run(
                 run_id=run_id,
                 turn=turn_number,
                 model=getattr(model_client, "model", ""),
-                response=response,
+                response=ModelResponseSnapshot.from_response(response),
             ))
 
             # 解析
@@ -233,7 +251,7 @@ def run(
                 turn=turn_number,
                 tool_name=action.tool_name,
                 action_id=action.action_id,
-                result=observation,
+                result=ToolResultSnapshot.from_result(observation),
             ))
             state.step_count += 1
             state.tool_calls += 1
@@ -296,12 +314,21 @@ def run(
             state.mark_step_done()
             events.emit(TurnEnded(run_id=run_id, turn=turn_number, status="completed"))
 
-    finally:
-        events.emit(RunFinished(
+    except Exception as exc:
+        state.status = "ERROR"
+        events.emit(RunFailed(
             run_id=run_id,
-            status=state.status,
-            reason=state.stop_reason.value if state.stop_reason else "unknown",
+            error_type=type(exc).__name__,
+            error=str(exc),
         ))
+        raise
+    finally:
+        if state.status != "ERROR":
+            events.emit(RunFinished(
+                run_id=run_id,
+                status=state.status,
+                reason=state.stop_reason.value if state.stop_reason else "unknown",
+            ))
         trajectory.close()
 
     return AgentRunResult(

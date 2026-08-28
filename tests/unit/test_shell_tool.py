@@ -1,7 +1,6 @@
 """Shell tool 单元测试：timeout / 正常退出 / 测试失败。"""
 
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -9,7 +8,6 @@ from coding_agent.config import AgentConfig
 from coding_agent.model.types import ToolResult
 from coding_agent.runtime.local import LocalRuntime
 from coding_agent.tools.shell import RunCommandTool
-
 
 # 用 sys.executable 而不是裸 "python" —— 后者在 venv / Docker 等环境里未必在 PATH。
 PY = sys.executable
@@ -94,3 +92,36 @@ class TestRunCommandNotFound:
         )
         assert not result.success
         assert result.is_runtime_error
+
+
+class TestValidationCommandClassifier:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "ls tests/",
+            "echo pytest",
+            'printf "test complete"',
+            "git diff -- tests/test_app.py",
+        ],
+    )
+    def test_non_validation_commands_are_not_classified(self, command):
+        assert not RunCommandTool.is_test_command(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "pytest -q",
+            f"{PY} -m pytest tests",
+            "python3 -m py_compile app.py",
+            "gcc -fsyntax-only main.c",
+            "g++ -fsyntax-only main.cpp",
+            "javac Main.java",
+            "node --check app.js",
+            "tsc --noEmit",
+            "dotnet test",
+            "dotnet build",
+            "php -l index.php",
+        ],
+    )
+    def test_executable_validation_commands_are_classified(self, command):
+        assert RunCommandTool.is_test_command(command)

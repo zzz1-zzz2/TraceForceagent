@@ -1,22 +1,26 @@
 """P2-1A typed event and synchronous emitter tests."""
 
-from pathlib import Path
+import pytest
 
 from coding_agent.agent.loop import run
 from coding_agent.config import AgentConfig
 from coding_agent.emitter import EventCollector, EventEmitter
 from coding_agent.events import (
     ModelCompleted,
+    ModelFailed,
+    ModelResponseSnapshot,
     ModelStarted,
+    RunFailed,
     RunFinished,
     RunStarted,
     ToolCompleted,
+    ToolResultSnapshot,
     ToolStarted,
     TurnEnded,
     TurnStarted,
 )
 from coding_agent.model.client import ModelClient
-from coding_agent.model.types import ModelResponse, TokenUsage, ToolCall
+from coding_agent.model.types import ModelResponse, TokenUsage, ToolCall, ToolResult
 
 
 def _response(name, arguments, call_id):
@@ -109,3 +113,100 @@ def test_agent_loop_emits_lifecycle_order(monkeypatch, tmp_path):
         RunStarted, TurnStarted, ModelStarted, ModelCompleted,
         ToolStarted, ToolCompleted, TurnEnded, RunFinished,
     ]
+
+
+def test_event_payloads_are_snapshots_not_core_objects():
+    response = _response(
+        "apply_patch",
+        {"path": "app.py", "options": {"mode": "create"}},
+        "call-1",
+    )
+    result = ToolResult(success=True, content="ok")
+    model_event = ModelCompleted(run_id="r", turn=1, response=response)
+    started_event = ToolStarted(
+        run_id="r", turn=1, tool_name="apply_patch", arguments=response.tool_calls[0].arguments
+    )
+    completed_event = ToolCompleted(run_id="r", turn=1, tool_name="apply_patch", result=result)
+
+    response.content = "mutated"
+    response.tool_calls[0].arguments["path"] = "other.py"
+    result.content = "mutated"
+
+    assert isinstance(model_event.response, ModelResponseSnapshot)
+    assert model_event.response.content == ""
+    assert model_event.response.tool_calls[0].arguments["path"] == "app.py"
+    assert started_event.arguments["options"] == {"mode": "create"}
+    assert isinstance(completed_event.result, ToolResultSnapshot)
+    assert completed_event.result.content == "ok"
+
+    with pytest.raises(TypeError):
+        started_event.arguments["path"] = "other.py"
+    with pytest.raises(TypeError):
+        model_event.response.tool_calls[0].arguments["path"] = "other.py"
+
+
+def test_model_exception_emits_failure_terminal_events(monkeypatch, tmp_path):
+    class FailingModel:
+        model = "failing"
+
+        def generate(self, messages, tools=None):
+            raise RuntimeError("model unavailable")
+
+    def fake_from_config(cls, config):
+        return FailingModel()
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(fake_from_config))
+    collector = EventCollector()
+    config = AgentConfig(
+        workspace_root=tmp_path,
+        trace_root=tmp_path / "trace",
+        max_wall_time=30,
+    )
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        run("test model failure", tmp_path, config, emitter=emitter)
+
+    assert [type(event) for event in collector.events] == [
+        RunStarted,
+        TurnStarted,
+        ModelStarted,
+        ModelFailed,
+        TurnEnded,
+        RunFailed,
+    ]
+    assert collector.events[4].status == "error"
+    assert collector.events[-1].error_type == "RuntimeError"
+    assert all(not isinstance(event, RunFinished) for event in collector.events)
+
+
+def test_protected_stop_emits_run_finished_without_open_turn(monkeypatch, tmp_path):
+    class FakeModel:
+        model = "fake"
+
+        def generate(self, messages, tools=None):
+            return _response("list_files", {"path": ".", "max_depth": 1}, "call")
+
+    def fake_from_config(cls, config):
+        return FakeModel()
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(fake_from_config))
+    collector = EventCollector()
+    config = AgentConfig(
+        workspace_root=tmp_path,
+        trace_root=tmp_path / "trace",
+        max_steps=1,
+        max_model_calls=5,
+        max_wall_time=30,
+    )
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+
+    result = run("inspect", tmp_path, config, emitter=emitter)
+
+    assert result.stop_reason == "max_steps"
+    assert isinstance(collector.events[-1], RunFinished)
+    assert collector.events[-1].status == "STOPPED"
+    assert [event.turn for event in collector.events if isinstance(event, TurnStarted)] == [1]
+    assert [event.turn for event in collector.events if isinstance(event, TurnEnded)] == [1]

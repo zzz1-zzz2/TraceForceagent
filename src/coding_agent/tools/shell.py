@@ -119,53 +119,22 @@ class RunCommandTool(Tool):
 
     @staticmethod
     def is_test_command(command: str) -> bool:
-        """公开版本：判断命令是否属于 validation / test 类别。
+        """判断命令是否属于可执行 validation。"""
+        import re
 
-        供 AgentLoop / FinishPolicy 复用。
-        """
-        lowered = command.lower()
-        keywords = (
-            "pytest",
-            "unittest",
-            "nosetests",
-            "python -m pytest",
-            "py.test",
-            "npm test",
-            "npm run test",
-            "yarn test",
-            "pnpm test",
-            "jest ",
-            "jest --",
-            "cargo test",
-            "cargo check",
-            "cargo build",
-            "go test",
-            "go build",
-            "go vet",
-            "mvn test",
-            "gradle test",
-            "make test",
-            "make build",
-            "make check",
-            "make lint",
-            "tox ",
-            "tox -",
-            "nox ",
-            "ruff check",
-            "ruff format --check",
-            "mypy ",
-            "python -m py_compile",
-            "python3 -m py_compile",
-            "python -m compileall",
-            "python3 -m compileall",
-            "npm run build",
-            "npm run lint",
-            "npm run check",
-            "yarn build",
-            "pnpm build",
-            "flake8",
-            "test ",        # 覆盖 `python tests/test_x.py` 等
-            "tests/",       # 覆盖 `pytest tests/...`
-            "test.py",
+        normalized = command.strip().lower()
+        patterns = (
+            r"(?:^|&&|;|\|\|)\s*(?:[^\s;&|]*/)?(?:python3?|py)\s+-m\s+(?:pytest|unittest|py_compile|compileall)\b",
+            r"(?:^|&&|;|\|\|)\s*(?:pytest|py\.test|nosetests|jest|flake8|mypy)\b",
+            r"(?:^|&&|;|\|\|)\s*(?:npm|yarn|pnpm)\s+(?:test|build)\b",
+            r"(?:^|&&|;|\|\|)\s*(?:npm|yarn|pnpm)\s+run\s+(?:test|build|lint|check)\b",
+            r"(?:^|&&|;|\|\|)\s*(?:cargo|go|mvn|gradle|make|tox|nox)\s+(?:test|check|build|vet|lint)\b",
+            r"(?:^|&&|;|\|\|)\s*(?:gcc|g\+\+|clang|clang\+\+)\s+[^;&|]*-fsyntax-only\b",
+            r"(?:^|&&|;|\|\|)\s*javac\b",
+            r"(?:^|&&|;|\|\|)\s*node\s+--check\b",
+            r"(?:^|&&|;|\|\|)\s*tsc\b[^;&|]*--noemit\b",
+            r"(?:^|&&|;|\|\|)\s*dotnet\s+(?:test|build)\b",
+            r"(?:^|&&|;|\|\|)\s*php\s+-l\b",
+            r"(?:^|&&|;|\|\|)\s*ruff\s+(?:check|format\s+--check)\b",
         )
-        return any(kw in lowered for kw in keywords)
+        return any(re.search(pattern, normalized) for pattern in patterns)

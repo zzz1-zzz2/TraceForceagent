@@ -57,6 +57,11 @@ def run(
     ),
     model: str = typer.Option(None, "--model", "-m", help="覆盖模型名"),
     max_steps: int = typer.Option(None, "--max-steps", help="覆盖最大步数"),
+    task_mode: str = typer.Option(
+        None,
+        "--task-mode",
+        help="任务模式：existing_repository 或 greenfield（默认自动推断）",
+    ),
     benchmark: bool = typer.Option(False, "--benchmark", help="Benchmark 模式（禁止交互）"),
 ) -> None:
     """运行 Agent 完成一个编程任务。"""
@@ -105,7 +110,12 @@ def run(
     from coding_agent.agent.loop import run as agent_run
 
     try:
-        result = agent_run(task=task_text, workspace=config.workspace_root, config=config)
+        result = agent_run(
+            task=task_text,
+            workspace=config.workspace_root,
+            config=config,
+            task_mode=task_mode,
+        )
         console.print(f"\n[green]✓ 完成：[/green] {result.summary}")
         console.print(f"[dim]Stop reason: {result.stop_reason}[/dim]")
         console.print(f"[dim]Steps: {result.steps}, Tokens: {result.total_tokens}[/dim]")

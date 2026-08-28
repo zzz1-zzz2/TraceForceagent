@@ -3,8 +3,108 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from types import MappingProxyType
+from typing import Any, ClassVar, TypeAlias
+
+ImmutableValue: TypeAlias = (
+    Mapping[str, "ImmutableValue"]
+    | tuple["ImmutableValue", ...]
+    | str
+    | int
+    | float
+    | bool
+    | None
+)
+
+
+def _freeze(value: Any) -> ImmutableValue:
+    """Recursively copy common payloads into immutable values."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    return repr(value)
+
+
+def _freeze_arguments(value: Any) -> Mapping[str, ImmutableValue]:
+    """Freeze a tool-call argument mapping with a precise public type."""
+    frozen = _freeze(value)
+    if isinstance(frozen, Mapping):
+        return frozen
+    return MappingProxyType({})
+
+
+@dataclass(frozen=True, kw_only=True)
+class ToolCallSnapshot:
+    """Immutable public view of a model tool call."""
+
+    id: str
+    name: str
+    arguments: Mapping[str, ImmutableValue]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "arguments", _freeze_arguments(self.arguments))
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelResponseSnapshot:
+    """Immutable model response payload for observers."""
+
+    content: str = ""
+    tool_calls: tuple[ToolCallSnapshot, ...] = ()
+    finish_reason: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @classmethod
+    def from_response(cls, response: Any) -> ModelResponseSnapshot:
+        calls = tuple(
+            ToolCallSnapshot(
+                id=str(getattr(call, "id", "")),
+                name=str(getattr(call, "name", "")),
+                arguments=_freeze_arguments(getattr(call, "arguments", {})),
+            )
+            for call in getattr(response, "tool_calls", ())
+        )
+        usage = getattr(response, "usage", None)
+        return cls(
+            content=str(getattr(response, "content", "") or ""),
+            tool_calls=calls,
+            finish_reason=str(getattr(response, "finish_reason", "") or ""),
+            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class ToolResultSnapshot:
+    """Immutable tool result payload for observers."""
+
+    success: bool
+    content: str
+    error: str = ""
+    truncated: bool = False
+    is_validation_failure: bool = False
+    is_runtime_error: bool = False
+    is_timeout: bool = False
+    summary: str = ""
+
+    @classmethod
+    def from_result(cls, result: Any) -> ToolResultSnapshot:
+        return cls(
+            success=bool(getattr(result, "success", False)),
+            content=str(getattr(result, "content", "") or ""),
+            error=str(getattr(result, "error", "") or ""),
+            truncated=bool(getattr(result, "truncated", False)),
+            is_validation_failure=bool(getattr(result, "is_validation_failure", False)),
+            is_runtime_error=bool(getattr(result, "is_runtime_error", False)),
+            is_timeout=bool(getattr(result, "is_timeout", False)),
+            summary=str(getattr(result, "summary", "") or ""),
+        )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -40,6 +140,13 @@ class RunFinished(BaseEvent):
 
 
 @dataclass(frozen=True, kw_only=True)
+class RunFailed(BaseEvent):
+    event_type: ClassVar[str] = "run_failed"
+    error_type: str = ""
+    error: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
 class TurnStarted(BaseEvent):
     event_type: ClassVar[str] = "turn_started"
     turn: int = 0
@@ -64,7 +171,21 @@ class ModelCompleted(BaseEvent):
     event_type: ClassVar[str] = "model_completed"
     turn: int = 0
     model: str = ""
-    response: Any = None
+    response: ModelResponseSnapshot | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.response is not None and not isinstance(self.response, ModelResponseSnapshot):
+            object.__setattr__(self, "response", ModelResponseSnapshot.from_response(self.response))
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelFailed(BaseEvent):
+    event_type: ClassVar[str] = "model_failed"
+    turn: int = 0
+    model: str = ""
+    error_type: str = ""
+    error: str = ""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -73,7 +194,12 @@ class ToolStarted(BaseEvent):
     turn: int = 0
     tool_name: str = ""
     action_id: str = ""
-    arguments: dict[str, Any] | None = None
+    arguments: Mapping[str, ImmutableValue] | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.arguments is not None:
+            object.__setattr__(self, "arguments", _freeze_arguments(self.arguments))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -82,16 +208,23 @@ class ToolCompleted(BaseEvent):
     turn: int = 0
     tool_name: str = ""
     action_id: str = ""
-    result: Any = None
+    result: ToolResultSnapshot | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.result is not None and not isinstance(self.result, ToolResultSnapshot):
+            object.__setattr__(self, "result", ToolResultSnapshot.from_result(self.result))
 
 
-AgentEvent = (
+AgentEvent: TypeAlias = (
     RunStarted
     | RunFinished
+    | RunFailed
     | TurnStarted
     | TurnEnded
     | ModelStarted
     | ModelCompleted
+    | ModelFailed
     | ToolStarted
     | ToolCompleted
 )
@@ -100,10 +233,15 @@ __all__ = [
     "AgentEvent",
     "BaseEvent",
     "ModelCompleted",
+    "ModelFailed",
+    "ModelResponseSnapshot",
     "ModelStarted",
+    "RunFailed",
     "RunFinished",
     "RunStarted",
+    "ToolCallSnapshot",
     "ToolCompleted",
+    "ToolResultSnapshot",
     "ToolStarted",
     "TurnEnded",
     "TurnStarted",

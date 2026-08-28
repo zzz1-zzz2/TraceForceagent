@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 
 from coding_agent.events import AgentEvent, BaseEvent
-
 
 _log = logging.getLogger(__name__)
 EventSink = Callable[[AgentEvent], None]
 
 
 class EventEmitter:
-    """Emit events synchronously to subscribers in registration order."""
+    """Emit immutable event snapshots synchronously in registration order."""
 
-    def __init__(self, *, on_sink_error: Callable[[EventSink, Exception, AgentEvent], None] | None = None):
+    def __init__(
+        self,
+        *,
+        on_sink_error: Callable[[EventSink, Exception, AgentEvent], None] | None = None,
+    ):
         self._sinks: list[EventSink] = []
         self._sequence = 0
         self._on_sink_error = on_sink_error
@@ -37,9 +41,7 @@ class EventEmitter:
 
     def emit(self, event: BaseEvent) -> AgentEvent:
         self._sequence += 1
-        assigned = event
-        if event.sequence != self._sequence:
-            assigned = type(event)(**{**event.__dict__, "sequence": self._sequence})
+        assigned: AgentEvent = replace(event, sequence=self._sequence)  # type: ignore[assignment]
         for sink in tuple(self._sinks):
             try:
                 sink(assigned)

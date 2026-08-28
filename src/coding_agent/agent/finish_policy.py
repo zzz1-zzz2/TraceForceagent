@@ -217,7 +217,7 @@ class FinishPolicy:
 
         # Static/document-only work may explicitly document why no command ran.
         # Merely saying "there are no tests" is intentionally not enough.
-        if requirements.static_only and skip_reason:
+        if requirements.static_only and skip_reason and state.last_validation_step == 0:
             state.finish_validation_skipped_reason = skip_reason
             return True, None
         if requirements.static_only and not skip_reason and state.last_validation_step == 0:
