@@ -118,11 +118,18 @@ def run(
 
 
 @app.command()
-def tui() -> None:
+def tui(
+    workspace: Path | None = typer.Option(
+        None,
+        "--workspace",
+        "-w",
+        help="Agent 工作目录（默认 ./workspace）",
+    ),
+) -> None:
     """启动 Textual TUI。"""
     from coding_agent.tui.app import CodingAgentApp
 
-    CodingAgentApp().run()
+    CodingAgentApp(workspace=workspace).run()
 
 
 @app.command()
