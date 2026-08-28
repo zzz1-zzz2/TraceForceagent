@@ -116,7 +116,22 @@ class FinishPolicy:
             (accepted, feedback)
             - accepted=True: 可以 finish
             - accepted=False: 拒绝，feedback 是给模型的明确指引
+
+        Greenfield 特例 (P1-6 修复)：
+        - task_mode == "greenfield" 时,跳过 mutation / validation 检查
+        - 仍然要求至少有一次 mutation(防止"什么都没写就 finish")
+        - 原因是 greenfield 项目(个人网站骨架 / CLI 工具骨架)通常没有
+          现有 test suite,FinishPolicy 不应强迫模型伪造 validation
         """
+        # ---- 0. greenfield escape hatch ----
+        if state.task_mode == "greenfield":
+            if state.last_mutation_step == 0:
+                return False, (
+                    "Greenfield task but no files were created yet. "
+                    "Use apply_patch to create the files first, then call finish."
+                )
+            return True, None
+
         # ---- 1. mutation check ----
         if not self.skip_mutation_check and state.last_mutation_step == 0:
             return False, (

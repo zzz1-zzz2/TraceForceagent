@@ -232,7 +232,7 @@ class TestFinishPolicyRejection:
         ])
 
         result = agent_run(
-            task="create broken.py and run failing tests",
+            task="修复 broken.py 并跑测试",
             workspace=fake_workspace,
             config=config,
         )

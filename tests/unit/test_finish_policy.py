@@ -159,3 +159,48 @@ class TestFinishPolicyStepOrdering:
         assert state.last_validation_step == 10
         assert state.last_validation_passed is True
         assert state.last_validation_command == "pytest"
+
+
+class TestGreenfieldEscape:
+    """P1-6 修复：greenfield 模式允许在无 validation 时 finish。
+
+    场景：用户说"帮我写一个个人网站骨架",没有 test suite 可跑,
+    Agent 创建了文件,但 FinishPolicy 不允许 finish(没有 validation),
+    模型陷入自我审查死循环。
+    """
+
+    def test_greenfield_with_mutation_finishes(self):
+        state = AgentState.initialize(
+            task="帮我写一个骨架", workspace=Path("/tmp"), task_mode="greenfield",
+        )
+        state.record_mutation(step=1)
+        action = FinishAction(summary="done", validation="")
+        policy = FinishPolicy()
+        accepted, fb = policy.check(state, action)
+        assert accepted is True
+        assert fb is None
+
+    def test_greenfield_without_mutation_rejected(self):
+        """greenfield 但什么都没创建 → 必须拒绝,防止 finish 即失效。"""
+        state = AgentState.initialize(
+            task="t", workspace=Path("/tmp"), task_mode="greenfield",
+        )
+        action = FinishAction(summary="nope", validation="")
+        policy = FinishPolicy()
+        accepted, fb = policy.check(state, action)
+        assert accepted is False
+        assert "create" in fb.lower()
+
+    def test_existing_repository_still_requires_validation(self):
+        """existing_repository 模式仍然要求 last_validation_step > 0。"""
+        state = AgentState.initialize(
+            task="fix bug", workspace=Path("/tmp"),
+            task_mode="existing_repository",
+        )
+        state.record_mutation(step=1)
+        # 没有 record_validation
+        action = FinishAction(summary="done", validation="")
+        policy = FinishPolicy()
+        accepted, fb = policy.check(state, action)
+        assert accepted is False
+        assert "test" in fb.lower()

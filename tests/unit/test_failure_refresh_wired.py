@@ -157,7 +157,7 @@ class TestRefresherInLoop:
         ])
 
         result = agent_run(
-            task="create broken.py and run tests",
+            task="修复 broken.py 并跑测试",  # 中文 + "修复" → existing_repository
             workspace=fake_workspace,
             config=config,
         )

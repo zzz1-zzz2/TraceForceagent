@@ -54,9 +54,15 @@ class TaskBrief:
         后续可让 LLM 在第一轮帮忙结构化。
         """
         if task_mode is None:
-            # 简单启发式：包含 "create" / "implement" / "build" / "new" → greenfield
+            # 简单启发式：包含 greenfield 关键字 → greenfield
+            # 注意：中文任务也得识别，"帮我写一个" / "做一个" 都是 greenfield
             lowered = task.lower()
-            if any(kw in lowered for kw in ["create", "implement", "build", "new", "from scratch"]):
+            greenfield_keywords = [
+                "create", "implement", "build", "new", "from scratch",
+                "write", "scaffold", "skeleton", "boilerplate",
+                "写一个", "做一个", "创建一个", "新建", "骨架", "从头", "从零",
+            ]
+            if any(kw in lowered for kw in greenfield_keywords):
                 task_mode = TaskMode.GREENFIELD
             else:
                 task_mode = TaskMode.EXISTING_REPOSITORY
