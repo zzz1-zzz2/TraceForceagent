@@ -110,39 +110,51 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                 trajectory.record_finish(state, action)
                 break
 
-            # 1) InvalidAction：解析器已捕获错误，转化为 Observation 让模型下一轮修正
+            # 1) InvalidAction：解析器已捕获错误（empty response / unknown tool / invalid args）
+            # 关键修复：不构造 fake tool message，而是注入高优先级 user feedback
             if action.is_invalid:
+                tool_list = ", ".join(registry.names())
+                feedback = (
+                    f"[InvalidAction] {action.error_msg}\n"
+                    f"Available tools: {tool_list}.\n"
+                    f"You MUST respond with a valid tool call in your next message. "
+                    f"Do not output plain text without a tool call."
+                )
+                context_manager.record_feedback(feedback)
+                state.consecutive_errors += 1
+                # 审计日志：记录 feedback 事件（不算 tool_call）
+                trajectory.record_feedback(state, feedback)
+                # 注意：feedback 不算真实 step，所以不递增 step_count / tool_calls。
+                # 但 mark_step_done 仍需调用以保证 stagnation signature 推进。
+                state.mark_step_done()
+                # 不走下面的 dispatch / state 派生 / termination.record_action
+                continue
+
+            # 2) ToolAction：dispatch 到 Tool
+            tool = registry.get(action.tool_name)
+            if tool is None:
+                # 未知 tool 优雅降级，告诉模型有哪些可用 tool
                 observation = ToolResult.fail(
-                    f"[InvalidAction] {action.error_msg}",
+                    f"Unknown tool: '{action.tool_name}'. "
+                    f"Available tools: {', '.join(registry.names())}",
                     is_runtime_error=True,
                 )
                 state.consecutive_errors += 1
             else:
-                # 2) ToolAction：dispatch 到 Tool
-                tool = registry.get(action.tool_name)
-                if tool is None:
-                    # 未知 tool 优雅降级，告诉模型有哪些可用 tool
-                    observation = ToolResult.fail(
-                        f"Unknown tool: '{action.tool_name}'. "
-                        f"Available tools: {', '.join(registry.names())}",
-                        is_runtime_error=True,
-                    )
-                    state.consecutive_errors += 1
-                else:
-                    try:
-                        observation = tool.execute(action.arguments, runtime)
-                        if observation.success:
-                            state.consecutive_errors = 0
-                        else:
-                            state.consecutive_errors += 1
-                        # timeout 单独计数
-                        if observation.is_timeout:
-                            state.consecutive_timeouts += 1
-                        else:
-                            state.consecutive_timeouts = 0
-                    except Exception as e:
-                        observation = tool.exception_observation(e)
+                try:
+                    observation = tool.execute(action.arguments, runtime)
+                    if observation.success:
+                        state.consecutive_errors = 0
+                    else:
                         state.consecutive_errors += 1
+                    # timeout 单独计数
+                    if observation.is_timeout:
+                        state.consecutive_timeouts += 1
+                    else:
+                        state.consecutive_timeouts = 0
+                except Exception as e:
+                    observation = tool.exception_observation(e)
+                    state.consecutive_errors += 1
 
             # 记录 + 更新状态
             trajectory.record_tool_call(state, action, observation)
@@ -150,7 +162,7 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
             state.tool_calls += 1
             state.record_action(action.tool_name, action.args_hash)
 
-            # 派生状态更新（InvalidAction 时 action.tool_name 是空字符串，自然 no-op）
+            # 派生状态更新（基于 tool_name 分类）
             if action.tool_name in ("apply_patch", "patch"):
                 if observation.success and action.arguments.get("path"):
                     state.record_modified(action.arguments["path"])

@@ -69,6 +69,21 @@ class TrajectoryLogger:
             "is_runtime_error": observation.is_runtime_error,
         })
 
+    def record_feedback(self, state, content: str) -> None:
+        """记录一条反馈（InvalidAction / FinishPolicy 拒绝等）。
+
+        与 record_tool_call 的区别：
+        - 没有真实的 tool dispatch
+        - 内容是给模型看的反馈文本
+        - step 不递增（feedback 不算真实推进）
+        """
+        self._write({
+            "run_id": self.run_id,
+            "step": state.step_count,
+            "type": "feedback",
+            "content": content[:1000],
+        })
+
     def record_finish(self, state, action) -> None:
         """记录 finish。"""
         self._write({

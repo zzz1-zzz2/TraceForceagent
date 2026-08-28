@@ -44,7 +44,14 @@ class _RecentTurn:
 
 
 class ContextManager:
-    """管理 Active Context 的构造与裁剪。"""
+    """管理 Active Context 的构造与裁剪。
+
+    关键设计：
+    - record_observation 只能用于"真实发生的 tool 调用"对应的 (assistant, tool) turn。
+    - record_feedback 用于"需要告诉模型某事、但不是因为真实 tool 执行"的场景
+      （如 InvalidAction、Finish Policy 拒绝等）。
+      feedback 作为 P0 消息注入，永不被裁剪；并且不构造 fake tool_call_id。
+    """
 
     SYSTEM_PROMPT = """You are a coding agent. You autonomously complete software engineering tasks.
 
@@ -71,6 +78,9 @@ Workspace path boundary: You cannot escape the workspace directory."""
         self.config = config
         self.working_state_builder = WorkingStateBuilder()
         self._recent_turns: deque[_RecentTurn] = deque(maxlen=config.recent_turns * 2)
+        # 高优先级反馈（如 InvalidAction、FinishPolicy 拒绝）。
+        # 与 record_observation 互斥：feedback 不构造 fake tool message。
+        self._feedback: deque[str] = deque(maxlen=10)
         # tiktoken encoder (cl100k_base 是 GPT-4/DeepSeek 通用)
         try:
             self._enc = tiktoken.get_encoding("cl100k_base")
@@ -105,6 +115,11 @@ Workspace path boundary: You cannot escape the workspace directory."""
 
         # P0: System Prompt
         candidates.append(("P0", {"role": "system", "content": self.SYSTEM_PROMPT}))
+
+        # P0: Feedback（高优先级，永远保留；用于 InvalidAction / FinishPolicy 拒绝等）
+        # 注意：每条 feedback 必须是完整自包含的，让模型在新一轮知道该改什么。
+        for fb in self._feedback:
+            candidates.append(("P0", {"role": "user", "content": fb}))
 
         # P0: Original Task
         candidates.append(("P0", {"role": "user", "content": f"# Task\n{state.original_task}"}))
@@ -221,6 +236,25 @@ Workspace path boundary: You cannot escape the workspace directory."""
             tool_result_content=observation.content[: self.config.max_tool_output],
             tool_result_success=observation.success,
         ))
+
+    def record_feedback(self, content: str) -> None:
+        """记录一条高优先级反馈（不构造 fake tool message）。
+
+        用于：
+        - InvalidAction：解析失败（empty response / unknown tool / invalid args）
+        - Finish Policy 拒绝：模型试图 finish 但未通过校验
+        - 其它需要告诉模型"下一步该做什么"的场景
+
+        与 record_observation 的关键区别：
+        - 不构造 (assistant, tool_call_id) → tool 消息对
+        - 直接作为 user message 注入 Active Context
+        - 优先级为 P0，永远不被裁剪
+
+        Args:
+            content: 反馈内容。应当自包含、明确告诉模型下一步动作。
+        """
+        if content and content.strip():
+            self._feedback.append(content.strip())
 
 
 def _json_dumps(obj: Any) -> str:
