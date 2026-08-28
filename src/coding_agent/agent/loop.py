@@ -19,7 +19,7 @@ from coding_agent.config import AgentConfig
 from coding_agent.context.manager import ContextManager
 from coding_agent.model.client import ModelClient
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
-from coding_agent.model.types import FinishAction
+from coding_agent.model.types import FinishAction, ToolResult
 from coding_agent.tools.registry import default_registry
 from coding_agent.trajectory.logger import TrajectoryLogger
 from coding_agent.runtime.local import LocalRuntime
