@@ -121,8 +121,12 @@ class TestEmptyResponse:
 
 
 class TestTextOnlyResponse:
-    def test_text_response_without_finish_signal(self):
-        """模型只输出普通文本（不包含 finish 信号）→ InvalidAction。"""
+    def test_text_response_without_tool_call(self):
+        """模型只输出普通文本（不带 tool_call）→ InvalidAction。
+        旧版本会把 'I'm done' / 'finished' 等文本识别为 finish 信号，
+        但这是高假阳性路径（think 阶段的 'not finished yet' 会被误判），
+        V1 已删除。
+        """
         parser = make_parser()
         response = ModelResponse(
             content="Let me think about this task carefully.",
@@ -133,10 +137,32 @@ class TestTextOnlyResponse:
         assert isinstance(action, InvalidAction)
         assert not action.is_finish
 
+    def test_text_saying_done_is_not_finish(self):
+        """回归：'I'm done' / 'task completed' / 'finished' 等文本
+        不再被识别为 finish。模型必须显式调用 finish tool。
+        """
+        parser = make_parser()
+        for text in [
+            "I'm done with the analysis.",
+            "I am done now.",
+            "Task completed successfully.",
+            "Finished implementing the feature.",
+            "Not finished yet, still working.",
+            "I'll be finished soon.",
+        ]:
+            response = ModelResponse(content=text, tool_calls=[], usage=TokenUsage())
+            action = parser.parse(response)
+            assert not action.is_finish, (
+                f"text '{text}' should NOT trigger FinishAction; "
+                f"got {type(action).__name__}"
+            )
+            assert action.is_invalid
 
-class TestTextFinishSignal:
-    def test_text_finish_signal_in_english(self):
-        """文本包含 'i'm done' 等英文 finish 信号 → FinishAction。"""
+
+class TestNoTextFinishSignal:
+    """text-based finish detection 已删除（见 TestTextOnlyResponse 注释）。"""
+
+    def test_old_text_finish_signal_no_longer_triggers(self):
         parser = make_parser()
         response = ModelResponse(
             content="I'm done. The task is finished.",
@@ -144,4 +170,5 @@ class TestTextFinishSignal:
             usage=TokenUsage(),
         )
         action = parser.parse(response)
-        assert isinstance(action, FinishAction)
+        assert not isinstance(action, FinishAction)
+        assert action.is_invalid

@@ -108,8 +108,42 @@ class RunCommandTool(Tool):
 
     def _looks_like_test_command(self, command: str) -> bool:
         """判断是否是测试命令。"""
+        return self.is_test_command(command)
+
+    @staticmethod
+    def is_test_command(command: str) -> bool:
+        """公开版本：判断命令是否属于 validation / test 类别。
+
+        供 AgentLoop / FinishPolicy 复用。
+        """
         lowered = command.lower()
-        return any(
-            kw in lowered
-            for kw in ["pytest", "unittest", "test ", "tests/", "nosetests", "python -m pytest"]
+        keywords = (
+            "pytest",
+            "unittest",
+            "nosetests",
+            "python -m pytest",
+            "py.test",
+            "npm test",
+            "npm run test",
+            "yarn test",
+            "pnpm test",
+            "jest ",
+            "jest --",
+            "cargo test",
+            "cargo build",
+            "go test",
+            "go build",
+            "mvn test",
+            "gradle test",
+            "make test",
+            "tox ",
+            "tox -",
+            "nox ",
+            "ruff check",
+            "mypy ",
+            "flake8",
+            "test ",        # 覆盖 `python tests/test_x.py` 等
+            "tests/",       # 覆盖 `pytest tests/...`
+            "test.py",
         )
+        return any(kw in lowered for kw in keywords)

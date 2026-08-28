@@ -71,6 +71,15 @@ class AgentState:
     finish_summary: str | None = None
     finish_validation: str | None = None
 
+    # --- Mutation / Validation tracking (P0-2 / P0-3) ---
+    # 用于 FinishPolicy 校验：必须"修改 → validation 通过"才能 finish。
+    # 0 表示"尚未发生"。
+    last_mutation_step: int = 0
+    last_validation_step: int = 0
+    last_validation_command: str = ""
+    last_validation_passed: bool | None = None  # True=pass, False=fail, None=未跑过
+    last_validation_summary: str = ""
+
     # --- 用量统计 ---
     total_input_tokens: int = 0
     total_output_tokens: int = 0
@@ -103,6 +112,39 @@ class AgentState:
     def record_modified(self, path: str) -> None:
         """记录修改过的文件。"""
         self.modified_files.add(path)
+
+    def record_mutation(self, step: int) -> None:
+        """记录最后一次 mutation 发生的 step（FinishPolicy 用）。
+
+        仅由 apply_patch 成功时调用。
+        """
+        self.last_mutation_step = max(self.last_mutation_step, step)
+
+    def record_validation(
+        self,
+        step: int,
+        command: str,
+        passed: bool,
+        summary: str = "",
+    ) -> None:
+        """记录最后一次 validation（FinishPolicy 用）。
+
+        Args:
+            step: 当前 step_count
+            command: 执行的命令
+            passed: 是否通过
+            summary: 简短结果摘要
+
+        语义：
+        - 只在 step > last_validation_step 时才更新（更早的事件被忽略）。
+        - 这是为了在"validation → mutation → validation"序列里，
+          第二次 validation（更新 step）覆盖第一次。
+        """
+        if step > self.last_validation_step:
+            self.last_validation_step = step
+            self.last_validation_command = command
+            self.last_validation_passed = passed
+            self.last_validation_summary = summary
 
     def record_inspected(self, path: str) -> None:
         """记录读过的文件。"""

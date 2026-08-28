@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from coding_agent.agent.brief import TaskBrief, TaskMode
+from coding_agent.agent.finish_policy import FinishPolicy, classify_validation
 from coding_agent.agent.state import AgentState
 from coding_agent.agent.termination import TerminationConfig, TerminationController
 from coding_agent.config import AgentConfig
@@ -70,6 +71,7 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
         max_model_calls=config.max_model_calls,
         max_wall_time=config.max_wall_time,
     ))
+    finish_policy = FinishPolicy()
     trajectory = TrajectoryLogger(run_id=run_id, workspace=workspace)
 
     try:
@@ -106,6 +108,16 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
             action = parser.parse(response)
 
             if isinstance(action, FinishAction):
+                # FinishPolicy 校验：只有"修改过 + 验证通过"才接受 finish。
+                # 否则转换为 feedback，让模型继续工作。
+                accepted, feedback = finish_policy.check(state, action)
+                if not accepted:
+                    fb_text = f"[FinishPolicy] {feedback}"
+                    context_manager.record_feedback(fb_text)
+                    state.consecutive_errors += 1
+                    trajectory.record_feedback(state, fb_text)
+                    state.mark_step_done()
+                    continue
                 state.mark_finished(action.summary, action.validation)
                 trajectory.record_finish(state, action)
                 break
@@ -167,6 +179,8 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                 if observation.success and action.arguments.get("path"):
                     state.record_modified(action.arguments["path"])
                     state.add_finding(f"Modified {action.arguments['path']}")
+                    # 记录 mutation 发生位置（FinishPolicy 用）
+                    state.record_mutation(state.step_count)
             elif action.tool_name == "read_file":
                 if observation.success and action.arguments.get("path"):
                     state.record_inspected(action.arguments["path"])
@@ -189,6 +203,16 @@ def run(task: str, workspace: Path, config: AgentConfig) -> AgentRunResult:
                     )
                     state.add_open_question(
                         "Why did the test fail? Inspect modified files and recent test output."
+                    )
+                # 识别 validation run 并记录到 state（无论 pass/fail）
+                cmd = action.arguments.get("command", "")
+                verdict = classify_validation(observation, cmd)
+                if verdict.is_validation:
+                    state.record_validation(
+                        step=state.step_count,
+                        command=cmd,
+                        passed=bool(verdict.passed),
+                        summary=verdict.reason,
                     )
 
             if observation.is_validation_failure:

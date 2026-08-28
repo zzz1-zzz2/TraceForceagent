@@ -32,14 +32,16 @@ class OpenAICompatibleParser:
 
         优先级：
         1. 多个 tool_calls：取第一个（V1 不支持并行）
-        2. 单个 tool_call：解析为 ToolAction
-        3. content 含 finish 信号（罕见）：解析为 FinishAction
-        4. 都没有：InvalidAction
+        2. 单个 tool_call：解析为 ToolAction 或 FinishAction（finish 是普通 tool）
+        3. 都没有：InvalidAction
+
+        注意：删除 text-based finish detection（"i'm done" / "i am done" /
+        "task completed" / "finished"）。文本匹配会产生大量假阳性（如模型在
+        think 时说"not finished yet"），并绕过 FinishPolicy 校验。
         """
         if not response.tool_calls and not response.content:
             return InvalidAction("Empty response from model")
 
-        # 处理 finish tool（OpenAI 兼容 provider 通过 finish tool 实现）
         if response.tool_calls:
             tc = response.tool_calls[0]
             tool = self.registry.get(tc.name)
@@ -70,15 +72,9 @@ class OpenAICompatibleParser:
                 raw_response=response.raw,
             )
 
-        # 如果模型在 content 里说 "I'm done"，转换为提示信息
-        content = response.content.lower()
-        if any(signal in content for signal in ["i'm done", "i am done", "task completed", "finished"]):
-            return FinishAction(
-                summary=response.content,
-                validation="(no explicit validation)",
-                notes="Detected via text signal (not via finish tool)",
-            )
-
+        # 模型在 content 里写了纯文本（不是 tool call）：
+        # 在 V1 policy 下视为 InvalidAction。让 AgentLoop 通过 record_feedback
+        # 告知模型"必须用 tool call"。
         return InvalidAction(
             f"Model returned text instead of tool call: {response.content[:200]}"
         )

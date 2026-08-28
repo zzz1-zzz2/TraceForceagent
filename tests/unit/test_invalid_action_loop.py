@@ -124,7 +124,11 @@ class TestInvalidActionInLoop:
     def test_empty_response_triggers_feedback_not_observation(
         self, workspace, config, monkeypatch_model
     ):
-        """连续返回空响应：feedback 累积，recent_turns 为空，tool_calls 不增加。"""
+        """连续返回空响应：feedback 累积，recent_turns 为空，tool_calls 不增加。
+
+        注意：finish 在没有 mutation+validation 的情况下会被 FinishPolicy 拒绝，
+        所以最终 stop_reason 是 max_consecutive_errors，不是 finish。
+        """
         fake = monkeypatch_model(
             [
                 _empty_response(),
@@ -140,14 +144,17 @@ class TestInvalidActionInLoop:
             config=config,
         )
 
-        # 跑到了 finish
+        # 跑完了所有 fake responses
         assert fake.call_count >= 4
-        assert result.stop_reason == "finish"
+        # finish 被 reject（没 mutation 也没 validation）→ 走 max_consecutive_errors
+        assert result.stop_reason != "finish"
 
     def test_unknown_tool_does_not_increment_tool_calls(
         self, workspace, config, monkeypatch_model
     ):
-        """未知工具的 InvalidAction 不算 tool_call，state.tool_calls == 0。"""
+        """未知工具的 InvalidAction 不算 tool_call，state.tool_calls == 0。
+
+        finish 同样被 reject。"""
         fake = monkeypatch_model(
             [
                 _unknown_tool_response(),
@@ -162,8 +169,7 @@ class TestInvalidActionInLoop:
             config=config,
         )
 
-        assert result.stop_reason == "finish"
-        # 3 次模型调用；0 次真实 tool dispatch
+        assert result.stop_reason != "finish"
         assert result.steps == 0  # step_count 不增加
 
     def test_mixed_invalid_and_real_action(self, workspace, config, monkeypatch_model):
@@ -172,7 +178,7 @@ class TestInvalidActionInLoop:
 
         # 1: 空响应 → InvalidAction
         # 2: list_files 真实调用
-        # 3: finish
+        # 3: finish（无 mutation，仍会被 FinishPolicy 拒）
         list_files_resp = ModelResponse(
             content="",
             tool_calls=[
@@ -195,8 +201,8 @@ class TestInvalidActionInLoop:
             config=config,
         )
 
-        # 应当 finish
-        assert result.stop_reason == "finish"
+        # finish 被 reject（只有 list_files，没有 mutation / validation）
+        assert result.stop_reason != "finish"
         # 只有一次真实 tool dispatch：list_files → step_count=1
         assert result.steps == 1
 
@@ -223,15 +229,15 @@ class TestInvalidActionTrajectory:
         self, workspace, config, monkeypatch_model, tmp_path
     ):
         """trajectory.jsonl 应当记录 type=feedback，不是 type=tool_call。"""
-        monkeypatch_model([_finish_response("done")])
-        # 第一次跑让 loop 自己产生 trajectory
+        # 注意：finish 在没 mutation 时被 reject，所以这里也走 max_consecutive_errors 路径。
+        # 我们直接验证 trajectory 文件存在并包含 model_call 事件。
+        monkeypatch_model([_empty_response() for _ in range(5)])
         agent_run(
             task="trajectory test",
             workspace=workspace,
             config=config,
         )
 
-        # 找 trajectory 文件
         import json
         from pathlib import Path
 
@@ -246,7 +252,9 @@ class TestInvalidActionTrajectory:
                 if line.strip():
                     events.append(json.loads(line))
 
-        # 至少有一个 model_call 和 finish
         types = [e["type"] for e in events]
+        # 5 次空响应：5 个 model_call + 5 个 feedback + 1 个 stop
         assert "model_call" in types
-        assert "finish" in types
+        assert "feedback" in types
+        # 不应该有 tool_call（因为没有真实 tool 执行）
+        assert "tool_call" not in types
