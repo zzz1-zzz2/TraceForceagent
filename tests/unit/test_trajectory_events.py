@@ -10,6 +10,7 @@ from coding_agent.emitter import CriticalEventDeliveryError, EventCollector, Eve
 from coding_agent.events import (
     FinishAccepted,
     RunFinished,
+    RunStarted,
     RunStateSnapshot,
     ToolCompleted,
     ToolResultSnapshot,
@@ -83,6 +84,7 @@ def test_run_finished_serializes_terminal_snapshot():
     ))
     assert record["type"] == "run_finished"
     assert record["status"] == "COMPLETED"
+    assert record["step"] == 2
     assert record["total_steps"] == 2
     assert record["modified_files"] == ["b.py", "a.py"]
     json.dumps(record)
@@ -117,10 +119,45 @@ def test_critical_sink_failure_runs_siblings_and_marks_sink_unhealthy():
     emitter.subscribe(lambda event: seen.append(event.event_type))
 
     with pytest.raises(CriticalEventDeliveryError, match="disk full"):
-        emitter.emit(FinishAccepted(run_id="r"))
-    # The healthy sibling still observed the event.
-    assert seen == ["finish_accepted"]
+        emitter.emit(RunStarted(run_id="r"))
+    # The healthy sibling still observed an ordinary event.
+    assert seen == ["run_started"]
 
     # The broken sink is skipped on later events; healthy sinks remain usable.
-    emitter.emit(RunFinished(run_id="r"))
-    assert seen == ["finish_accepted", "run_finished"]
+    emitter.emit(RunStarted(run_id="r"))
+    assert seen == ["run_started", "run_started"]
+
+
+def test_finish_accepted_critical_failure_is_hidden_from_ui():
+    seen = []
+
+    def broken(_event):
+        raise OSError("disk full")
+
+    emitter = EventEmitter()
+    emitter.subscribe(broken, critical=True)
+    emitter.subscribe(lambda event: seen.append(event.event_type))
+
+    with pytest.raises(CriticalEventDeliveryError, match="disk full"):
+        emitter.emit(FinishAccepted(run_id="r"))
+    assert seen == []
+
+
+def test_finish_accepted_reaches_ui_after_persistence():
+    seen = []
+    order = []
+
+    def persistent(event):
+        order.append(("trajectory", event.event_type))
+
+    def ui(event):
+        order.append(("ui", event.event_type))
+        seen.append(event.event_type)
+
+    emitter = EventEmitter()
+    emitter.subscribe(ui)
+    emitter.subscribe(persistent, critical=True)
+    emitter.emit(FinishAccepted(run_id="r"))
+
+    assert seen == ["finish_accepted"]
+    assert order == [("trajectory", "finish_accepted"), ("ui", "finish_accepted")]

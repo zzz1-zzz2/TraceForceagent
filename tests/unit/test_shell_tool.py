@@ -105,6 +105,11 @@ class TestValidationCommandClassifier:
             "pytest || true",
             "pytest; echo done",
             "pytest | tee test.log",
+            "pytest | tee test.log && set -o pipefail",
+            "pytest | tee test.log && true && set -o pipefail",
+            "set -o pipefail && set +o pipefail && pytest | tee test.log",
+            "set -o pipefail | true && pytest | tee test.log",
+            'echo "set -o pipefail" && pytest | tee test.log',
         ],
     )
     def test_non_validation_commands_are_not_classified(self, command):

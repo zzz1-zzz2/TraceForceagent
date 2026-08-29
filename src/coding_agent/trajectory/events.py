@@ -77,6 +77,7 @@ def event_to_record(event: AgentEvent) -> dict[str, Any]:
     elif event_type == "run_finished":
         final = payload.pop("final_state", {}) or {}
         payload["type"] = "stop" if final.get("status") == "STOPPED" else "run_finished"
+        payload["step"] = final.get("steps", 0)
         payload.update(_legacy_terminal_fields(final))
     elif event_type == "run_failed":
         final = payload.pop("final_state", {}) or {}
@@ -100,6 +101,7 @@ def _legacy_terminal_fields(final: dict[str, Any]) -> dict[str, Any]:
         "summary": final.get("summary", ""),
         "validation": final.get("validation", ""),
         "validation_skipped_reason": final.get("validation_skipped_reason", ""),
+        "step": final.get("steps", 0),
         "total_steps": final.get("steps", 0),
         "total_tokens": final.get("total_tokens", 0),
         "modified_files": final.get("modified_files", []),

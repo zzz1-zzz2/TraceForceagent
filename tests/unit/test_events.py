@@ -3,6 +3,7 @@
 import pytest
 
 from coding_agent.agent.loop import run
+from coding_agent.agent.state import AgentState
 from coding_agent.config import AgentConfig
 from coding_agent.emitter import EventCollector, EventEmitter
 from coding_agent.events import (
@@ -15,6 +16,7 @@ from coding_agent.events import (
     RunFinished,
     RunStarted,
     ToolCompleted,
+    ToolFailed,
     ToolResultSnapshot,
     ToolStarted,
     TurnEnded,
@@ -212,6 +214,65 @@ def test_protected_stop_emits_run_finished_without_open_turn(monkeypatch, tmp_pa
     assert isinstance(collector.events[-1], RunFinished)
     assert collector.events[-1].status == "STOPPED"
     assert [event.turn for event in collector.events if isinstance(event, TurnStarted)] == [1]
+    assert [event.turn for event in collector.events if isinstance(event, TurnEnded)] == [1]
+
+
+def test_tool_lifecycle_uses_pre_increment_legacy_steps(monkeypatch, tmp_path):
+    responses = iter([
+        _response("list_files", {"path": ".", "max_depth": 1}, "a1"),
+        _response("list_files", {"path": ".", "max_depth": 1}, "a2"),
+    ])
+
+    class FakeModel:
+        model = "fake"
+
+        def generate(self, messages, tools=None):
+            return next(responses)
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: FakeModel()))
+    collector = EventCollector()
+    config = AgentConfig(
+        workspace_root=tmp_path,
+        trace_root=tmp_path / "trace",
+        max_steps=2,
+        max_model_calls=10,
+        max_wall_time=30,
+    )
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+
+    run("inspect", tmp_path, config, emitter=emitter)
+
+    starts = [event for event in collector.events if isinstance(event, ToolStarted)]
+    completions = [event for event in collector.events if isinstance(event, ToolCompleted)]
+    assert [event.step for event in starts] == [0, 1]
+    assert [event.step for event in completions] == [0, 1]
+
+
+def test_tool_fallback_failure_preserves_original_step_and_totals(monkeypatch, tmp_path):
+    class FakeModel:
+        model = "fake"
+
+        def generate(self, messages, tools=None):
+            return _response("list_files", {"path": ".", "max_depth": 1}, "call")
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: FakeModel()))
+    monkeypatch.setattr(AgentState, "record_action", lambda self, tool_name, args_hash: (_ for _ in ()).throw(RuntimeError("commit failed")))
+    collector = EventCollector()
+    config = AgentConfig(workspace_root=tmp_path, trace_root=tmp_path / "trace")
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        run("inspect", tmp_path, config, emitter=emitter)
+
+    starts = [event for event in collector.events if isinstance(event, ToolStarted)]
+    failures = [event for event in collector.events if isinstance(event, ToolFailed)]
+    assert [event.step for event in starts] == [0]
+    assert [event.step for event in failures] == [0]
+    assert collector.events[-1].final_state.steps == 1
+    assert isinstance(collector.events[-2], TurnEnded)
+    assert collector.events[-2].status == "error"
 
 
 def test_parser_exception_closes_turn_and_run(monkeypatch, tmp_path):

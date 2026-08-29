@@ -123,7 +123,7 @@ def _run_loop(
     turn_number = 0
     active_turn: int | None = None
     active_model = False
-    active_tool: tuple[AgentAction, ToolResult | None] | None = None
+    active_tool: tuple[AgentAction, ToolResult | None, int] | None = None
 
     state = AgentState.initialize(
         task=task,
@@ -261,11 +261,12 @@ def _run_loop(
                 end_turn(turn_number, "invalid")
                 continue
 
-            active_tool = (action, None)
+            tool_step = state.step_count
+            active_tool = (action, None, tool_step)
             events.emit(ToolStarted(
                 run_id=run_id,
                 turn=turn_number,
-                step=state.step_count,
+                step=tool_step,
                 tool_name=action.tool_name,
                 action_id=action.action_id,
                 arguments=action.arguments,
@@ -293,7 +294,7 @@ def _run_loop(
                     tool_exception = exc
                     observation = tool.exception_observation(exc)
                     state.consecutive_errors += 1
-            active_tool = (action, observation)
+            active_tool = (action, observation, tool_step)
 
             # Commit all core facts before announcing the tool's terminal event.
             state.step_count += 1
@@ -339,7 +340,7 @@ def _run_loop(
                 events.emit(ToolFailed(
                     run_id=run_id,
                     turn=turn_number,
-                    step=state.step_count,
+                    step=tool_step,
                     tool_name=action.tool_name,
                     action_id=action.action_id,
                     arguments=action.arguments,
@@ -352,7 +353,7 @@ def _run_loop(
                 events.emit(ToolCompleted(
                     run_id=run_id,
                     turn=turn_number,
-                    step=state.step_count,
+                    step=tool_step,
                     tool_name=action.tool_name,
                     action_id=action.action_id,
                     arguments=action.arguments,
@@ -402,12 +403,13 @@ def _run_loop(
         if active_tool is not None:
             active_action = active_tool[0]
             active_observation: ToolResult | None = active_tool[1]
+            active_tool_step = active_tool[2]
             active_tool = None
             try:
                 events.emit(ToolFailed(
                     run_id=run_id,
                     turn=turn_number,
-                    step=state.step_count,
+                    step=active_tool_step,
                     tool_name=active_action.tool_name,
                     action_id=active_action.action_id,
                     arguments=active_action.arguments,

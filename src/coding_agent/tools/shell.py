@@ -201,13 +201,24 @@ class RunCommandTool(Tool):
         for index, (_segment, operator) in enumerate(parts):
             if index <= first_validation and operator in ("||", "&", ";"):
                 return False
+
+        pipefail_enabled = False
+        for index, (segment, operator) in enumerate(parts):
+            # ``operator`` connects the previous segment to this segment.  A
+            # pipeline observes the shell state established by all earlier
+            # standalone segments, not a later ``set -o pipefail`` command.
+            if operator == "|" and not pipefail_enabled:
+                return False
+            in_pipeline = operator == "|" or (
+                index + 1 < len(parts) and parts[index + 1][1] == "|"
+            )
+            if not in_pipeline and re.fullmatch(r"set\s+-o\s+pipefail", segment):
+                pipefail_enabled = True
+            elif not in_pipeline and re.fullmatch(r"set\s+\+o\s+pipefail", segment):
+                pipefail_enabled = False
+
         # Once validation starts, any later command/status combinator can mask it.
         for _segment, operator in parts[first_validation + 1:]:
             if operator in (";", "||", "&"):
                 return False
-            if operator == "|":
-                # Plain pipelines report the last process' status.  Accept one
-                # only when this shell explicitly enabled pipefail.
-                if not re.search(r"(?:^|[;&|])\s*set\s+-o\s+pipefail\b", normalized):
-                    return False
         return True

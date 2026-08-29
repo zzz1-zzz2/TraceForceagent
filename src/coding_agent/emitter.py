@@ -10,6 +10,17 @@ from coding_agent.events import AgentEvent, BaseEvent
 
 _log = logging.getLogger(__name__)
 EventSink = Callable[[AgentEvent], None]
+_PERSIST_FIRST_EVENT_TYPES = frozenset({
+    "model_completed",
+    "model_failed",
+    "tool_completed",
+    "tool_failed",
+    "turn_ended",
+    "finish_accepted",
+    "validation_completed",
+    "run_finished",
+    "run_failed",
+})
 
 
 class CriticalEventDeliveryError(RuntimeError):
@@ -71,28 +82,14 @@ class EventEmitter:
         sinks = tuple(self._sinks)
         # Critical sinks run first for terminal lifecycle events. If persistence
         # fails, best-effort observers must not see a misleading terminal state.
-        if assigned.event_type in {
-            "model_completed",
-            "model_failed",
-            "tool_completed",
-            "tool_failed",
-            "turn_ended",
-            "run_finished",
-        }:
+        if assigned.event_type in _PERSIST_FIRST_EVENT_TYPES:
             critical = tuple(sink for sink in sinks if sink in self._critical_sinks)
             best_effort = tuple(sink for sink in sinks if sink not in self._critical_sinks)
             sinks = critical + best_effort
         for sink in sinks:
             if sink in self._unhealthy_sinks:
                 continue
-            if assigned.event_type in {
-                "model_completed",
-                "model_failed",
-                "tool_completed",
-                "tool_failed",
-                "turn_ended",
-                "run_finished",
-            } and sink not in self._critical_sinks and errors:
+            if assigned.event_type in _PERSIST_FIRST_EVENT_TYPES and sink not in self._critical_sinks and errors:
                 continue
             try:
                 sink(assigned)
