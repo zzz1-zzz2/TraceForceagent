@@ -281,8 +281,8 @@ class TestEmptyResponseRegression:
         assert not action.is_protocol_failure
         assert "empty" in action.error_msg.lower()
 
-    def test_text_only_returns_semantic_invalid(self) -> None:
-        """纯文本（不带 tool_call）仍按 InvalidAction 处理（V1 协议）。"""
+    def test_text_only_returns_assistant_reply(self) -> None:
+        """明确 stop 的纯文本是合法 AssistantReplyAction。"""
         response = ModelResponse(
             content="Just thinking out loud.",
             tool_calls=[],
@@ -290,9 +290,9 @@ class TestEmptyResponseRegression:
             usage=TokenUsage(),
         )
         action = _parser().parse(response)
-        assert isinstance(action, InvalidAction)
-        assert action.is_invalid
-        assert not action.is_protocol_failure
+        from coding_agent.model.types import AssistantReplyAction
+        assert isinstance(action, AssistantReplyAction)
+        assert action.reply_text == "Just thinking out loud."
 
 
 # ============================================================

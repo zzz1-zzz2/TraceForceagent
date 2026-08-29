@@ -263,7 +263,8 @@ class FinalResultWidget(Vertical):
 
     def apply_state(self, state: RunUiState) -> None:
         status = state.terminal_status or ("COMPLETED" if state.finish_accepted else "")
-        icon = "✓" if status == "COMPLETED" else "!" if status == "STOPPED" else "✗"
+        is_answered = state.phase == "answered"
+        icon = "✓" if status == "COMPLETED" or is_answered else "!" if status == "STOPPED" else "✗"
         self.set_class(status == "COMPLETED", "finished")
         self.set_class(status == "STOPPED", "stopped")
         self.set_class(status not in {"", "COMPLETED", "STOPPED"}, "error")
@@ -292,7 +293,7 @@ class RunStatusWidget(Static):
     def apply_state(self, state: RunUiState) -> None:
         phase = state.phase
         if state.terminal:
-            icon = "✓" if phase == "finished" else "!" if phase == "stopped" else "✗"
+            icon = "✓" if phase in {"finished", "answered"} else "!" if phase == "stopped" else "✗"
             text = f"{icon} {phase} · {state.step} steps · {state.total_tokens:,} tokens"
         elif phase == "idle":
             text = "ready"

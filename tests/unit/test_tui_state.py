@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from coding_agent.events import (
+    AssistantReplied,
     FinishAccepted,
     ModelCompleted,
     ModelResponseSnapshot,
@@ -366,7 +367,23 @@ def test_run_failed_marks_running_tools_as_error():
     assert a2.status is ToolUiStatus.ERROR
 
 
-def test_run_finished_is_terminal_and_records_token_summary():
+def test_assistant_reply_is_terminal_and_preserves_text():
+    state = reduce_event(initial_ui_state(), _started("run-1", sequence=1))
+    state = reduce_event(state, AssistantReplied(
+        run_id="run-1",
+        sequence=2,
+        turn=1,
+        text="你好",
+        final_state=RunStateSnapshot(
+            status="COMPLETED", reason="assistant_reply", summary="你好"
+        ),
+    ))
+    assert state.terminal
+    assert state.phase == "answered"
+    assert state.assistant_messages == ("你好",)
+    assert state.final_summary == "你好"
+
+
     state = reduce_event(initial_ui_state(), _started("run-1", sequence=1))
     state = reduce_event(state, _model_completed("run-1", sequence=2, turn=1, input_tokens=3, output_tokens=5))
     state = reduce_event(state, _finish_accepted("run-1", sequence=3))

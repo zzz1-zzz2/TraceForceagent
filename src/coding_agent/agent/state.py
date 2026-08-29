@@ -18,6 +18,7 @@ class StopReason(str, Enum):
     """循环终止原因。"""
 
     FINISH = "finish"  # 模型显式 finish
+    ASSISTANT_REPLY = "assistant_reply"  # 普通助手回答
     MAX_STEPS = "max_steps"
     MAX_MODEL_CALLS = "max_model_calls"
     MAX_WALL_TIME = "max_wall_time"
@@ -71,6 +72,7 @@ class AgentState:
     finish_summary: str | None = None
     finish_validation: str | None = None
     finish_validation_skipped_reason: str | None = None
+    reply_text: str | None = None
 
     # --- Mutation / Validation tracking (P0-2 / P0-3) ---
     # 用于 FinishPolicy 校验：必须"修改 → validation 通过"才能 finish。
@@ -261,6 +263,12 @@ class AgentState:
             self.recent_validation,
             tuple(self.current_findings[-3:]) if self.current_findings else (),
         )
+
+    def mark_answered(self, text: str) -> None:
+        """Mark the run complete with a direct assistant answer."""
+        self.status = "COMPLETED"
+        self.reply_text = text
+        self.stop_reason = StopReason.ASSISTANT_REPLY
 
     def mark_finished(
         self,

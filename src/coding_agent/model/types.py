@@ -95,6 +95,17 @@ class AgentAction:
 
 
 @dataclass
+class AssistantReplyAction(AgentAction):
+    """合法的普通助手文本回答。"""
+
+    reply_text: str = ""
+
+    def __init__(self, reply_text: str, *, raw_response: Any = None):
+        super().__init__(is_finish=False, raw_response=raw_response)
+        self.reply_text = reply_text
+
+
+@dataclass
 class FinishAction(AgentAction):
     """显式 Finish Action。"""
 

@@ -9,6 +9,7 @@ from textual.widgets import Input
 
 from coding_agent.events import (
     AgentEvent,
+    AssistantReplied,
     FinishAccepted,
     ModelCompleted,
     ModelResponseSnapshot,
@@ -103,7 +104,31 @@ async def test_lifecycle_events_create_and_reuse_component_cards(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_terminal_events_reuse_final_card_and_reenable_input(tmp_path: Path) -> None:
+async def test_assistant_reply_renders_and_reenables_input(tmp_path: Path) -> None:
+    app = CodingAgentApp(workspace=tmp_path)
+    async with app.run_test() as pilot:
+        await _post(app, pilot, RunStarted(run_id="run-1", sequence=1))
+        app.query_one(Input).disabled = True
+        await _post(app, pilot, AssistantReplied(
+            run_id="run-1",
+            sequence=2,
+            turn=1,
+            text="你好，世界",
+            final_state=RunStateSnapshot(
+                status="COMPLETED", reason="assistant_reply", summary="你好，世界"
+            ),
+        ))
+        await _post(app, pilot, RunFinished(
+            run_id="run-1",
+            sequence=3,
+            final_state=RunStateSnapshot(
+                status="COMPLETED", reason="assistant_reply", summary="你好，世界"
+            ),
+        ))
+        assert len(app.query(AssistantMessageWidget)) == 1
+        assert not app.query_one(Input).disabled
+
+
     app = CodingAgentApp(workspace=tmp_path)
     async with app.run_test() as pilot:
         await _post(app, pilot, RunStarted(run_id="run-1", sequence=1))

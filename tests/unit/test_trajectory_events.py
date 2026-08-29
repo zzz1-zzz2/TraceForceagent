@@ -8,6 +8,7 @@ import pytest
 
 from coding_agent.emitter import CriticalEventDeliveryError, EventCollector, EventEmitter
 from coding_agent.events import (
+    AssistantReplied,
     FinishAccepted,
     RunFinished,
     RunStarted,
@@ -68,7 +69,22 @@ def test_event_to_record_rejects_unknown_values():
         event_to_record(event)
 
 
-def test_run_finished_serializes_terminal_snapshot():
+def test_assistant_reply_serializes_as_distinct_terminal_record():
+    record = event_to_record(AssistantReplied(
+        run_id="r",
+        sequence=3,
+        turn=1,
+        text="你好",
+        final_state=RunStateSnapshot(
+            status="COMPLETED", reason="assistant_reply", summary="你好"
+        ),
+    ))
+    assert record["event_type"] == "assistant_replied"
+    assert record["type"] == "assistant_reply"
+    assert record["reply"] == "你好"
+    assert record["reason"] == "assistant_reply"
+
+
     record = event_to_record(RunFinished(
         run_id="r",
         sequence=3,

@@ -16,6 +16,7 @@ from coding_agent.context.manager import ContextManager
 from coding_agent.emitter import EventEmitter
 from coding_agent.events import (
     FeedbackRecorded,
+    AssistantReplied,
     FinishAccepted,
     ModelCompleted,
     ModelFailed,
@@ -35,7 +36,7 @@ from coding_agent.events import (
 )
 from coding_agent.model.client import ModelClient
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
-from coding_agent.model.types import AgentAction, FinishAction, ToolResult
+from coding_agent.model.types import AgentAction, AssistantReplyAction, FinishAction, ToolResult
 from coding_agent.recovery.failure_refresh import FailureAwareRefresher
 from coding_agent.runtime.local import LocalRuntime
 from coding_agent.tools.registry import default_registry
@@ -53,6 +54,7 @@ class AgentRunResult:
     steps: int
     total_tokens: int
     duration: float
+    reply: str | None = None
     trajectory_path: Path | None = None
 
 
@@ -61,9 +63,10 @@ def _snapshot(state: AgentState, *, reason: str = "") -> RunStateSnapshot:
     return RunStateSnapshot(
         status=state.status,
         reason=reason or (state.stop_reason.value if state.stop_reason else ""),
-        summary=state.finish_summary or "",
+        summary=state.finish_summary or state.reply_text or "",
         validation=state.finish_validation or "",
         validation_skipped_reason=state.finish_validation_skipped_reason or "",
+        reply=state.reply_text or "",
         steps=state.step_count,
         total_tokens=state.total_tokens(),
         modified_files=tuple(sorted(state.modified_files)),
@@ -215,6 +218,35 @@ def _run_loop(
                 response=ModelResponseSnapshot.from_response(response),
             ))
             action = parser.parse(response)
+
+            if isinstance(action, AssistantReplyAction):
+                if state.last_mutation_step > 0:
+                    feedback = (
+                        "A workspace mutation occurred in this run. Do not finish with "
+                        "plain text; run validation and call finish(summary, validation)."
+                    )
+                    context_manager.record_feedback(f"[FinishPolicy] {feedback}")
+                    state.consecutive_errors += 1
+                    events.emit(FeedbackRecorded(
+                        run_id=run_id,
+                        step=state.step_count,
+                        kind="finish_rejected",
+                        content=f"[FinishPolicy] {feedback}",
+                    ))
+                    state.mark_step_done()
+                    end_turn(turn_number, "reply_rejected")
+                    continue
+
+                state.mark_answered(action.reply_text)
+                events.emit(AssistantReplied(
+                    run_id=run_id,
+                    turn=turn_number,
+                    step=state.step_count,
+                    text=action.reply_text,
+                    final_state=_snapshot(state),
+                ))
+                end_turn(turn_number, "answered")
+                break
 
             if isinstance(action, FinishAction):
                 accepted, feedback = finish_policy.check(state, action)
@@ -467,8 +499,9 @@ def _run_loop(
         raise
 
     return AgentRunResult(
-        summary=state.finish_summary or "(no summary)",
+        summary=state.finish_summary or state.reply_text or "(no summary)",
         validation=state.finish_validation or "",
+        reply=state.reply_text,
         stop_reason=state.stop_reason.value if state.stop_reason else "unknown",
         steps=state.step_count,
         total_tokens=state.total_tokens(),

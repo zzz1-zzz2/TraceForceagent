@@ -13,6 +13,7 @@ from textual.widgets import Input
 from coding_agent import __version__
 from coding_agent.config import load_config, run_preflight
 from coding_agent.events import (
+    AssistantReplied,
     FeedbackRecorded,
     FinishAccepted,
     ModelCompleted,
@@ -263,6 +264,15 @@ class CodingAgentApp(App):
                     await self._append(assistant_widget)
                 else:
                     assistant_widget.set_content(response.content)
+        elif isinstance(event, AssistantReplied):
+            assistant_key = (event.run_id, event.turn)
+            assistant_widget = self._assistant_widgets.get(assistant_key)
+            if assistant_widget is None:
+                assistant_widget = AssistantMessageWidget(event.text)
+                self._assistant_widgets[assistant_key] = assistant_widget
+                await self._append(assistant_widget)
+            else:
+                assistant_widget.set_content(event.text)
         elif isinstance(event, (ToolStarted, ToolCompleted, ToolFailed)):
             tool_key = (event.run_id, event.action_id)
             tool_state = self._ui_state.tools.get(tool_key)

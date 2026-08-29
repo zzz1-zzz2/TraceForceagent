@@ -147,6 +147,7 @@ class RunStateSnapshot:
     summary: str = ""
     validation: str = ""
     validation_skipped_reason: str = ""
+    reply: str = ""
     steps: int = 0
     total_tokens: int = 0
     modified_files: tuple[str, ...] = ()
@@ -209,6 +210,21 @@ class ValidationCompleted(BaseEvent):
     passed: bool | None = None
     summary: str = ""
     is_runtime_error: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class AssistantReplied(BaseEvent):
+    """A complete assistant response that answers without tool execution."""
+
+    event_type: ClassVar[str] = "assistant_replied"
+    turn: int = 0
+    step: int = 0
+    text: str = ""
+    final_state: RunStateSnapshot = RunStateSnapshot()
+
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -316,6 +332,7 @@ AgentEvent: TypeAlias = (
     | RunFailed
     | FeedbackRecorded
     | ValidationCompleted
+    | AssistantReplied
     | FinishAccepted
     | TurnStarted
     | TurnEnded
@@ -330,6 +347,7 @@ AgentEvent: TypeAlias = (
 __all__ = [
     "AgentEvent",
     "BaseEvent",
+    "AssistantReplied",
     "FeedbackRecorded",
     "FinishAccepted",
     "ModelCompleted",

@@ -14,6 +14,7 @@ from types import MappingProxyType
 
 from coding_agent.events import (
     AgentEvent,
+    AssistantReplied,
     FeedbackRecorded,
     FinishAccepted,
     ModelCompleted,
@@ -260,6 +261,21 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
         feedback = (*state.feedback, event.content)
         return replace(state, phase="feedback", step=event.step, feedback=feedback[-10:])
 
+    if isinstance(event, AssistantReplied):
+        final = event.final_state
+        return replace(
+            state,
+            phase="answered",
+            turn=event.turn,
+            step=event.step,
+            assistant_messages=(*state.assistant_messages, event.text),
+            terminal_status=final.status,
+            terminal_reason=final.reason,
+            final_summary=final.summary,
+            terminal=True,
+            modified_files=tuple(final.modified_files),
+        )
+
     if isinstance(event, FinishAccepted):
         final = event.final_state
         return replace(
@@ -288,7 +304,7 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
 
     if isinstance(event, RunFinished):
         final = event.final_state
-        phase = "stopped" if final.status == "STOPPED" else "finished"
+        phase = "stopped" if final.status == "STOPPED" else ("answered" if final.reason == "assistant_reply" else "finished")
         return replace(
             state,
             phase=phase,

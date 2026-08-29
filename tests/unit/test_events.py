@@ -8,6 +8,7 @@ from coding_agent.config import AgentConfig
 from coding_agent.emitter import EventCollector, EventEmitter
 from coding_agent.events import (
     FinishAccepted,
+    AssistantReplied,
     ModelCompleted,
     ModelFailed,
     ModelResponseSnapshot,
@@ -55,7 +56,30 @@ def test_emitter_assigns_monotonic_sequence_and_isolates_sink_errors():
     assert seen == ["run_started", "turn_started"]
 
 
-def test_agent_loop_emits_lifecycle_order(monkeypatch, tmp_path):
+def test_agent_loop_answers_plain_text_without_invalid_feedback(monkeypatch, tmp_path):
+    class FakeModel:
+        model = "fake"
+
+        def generate(self, messages, tools=None):
+            return ModelResponse(content="你好", finish_reason="stop", usage=TokenUsage())
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: FakeModel()))
+    collector = EventCollector()
+    config = AgentConfig(workspace_root=tmp_path, trace_root=tmp_path / "trace")
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+
+    result = run("你好", tmp_path, config, emitter=emitter)
+
+    assert result.stop_reason == "assistant_reply"
+    assert result.reply == "你好"
+    assert [type(event) for event in collector.events] == [
+        RunStarted, TurnStarted, ModelStarted, ModelCompleted,
+        AssistantReplied, TurnEnded, RunFinished,
+    ]
+    assert not any(event.event_type == "feedback_recorded" for event in collector.events)
+
+
     responses = iter([
         _response("apply_patch", {"path": "hello.py", "mode": "create", "content": "x = 1\n"}, "a1"),
         _response("run_command", {"command": "python3 -m py_compile hello.py"}, "a2"),

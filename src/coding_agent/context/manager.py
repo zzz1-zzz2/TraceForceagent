@@ -65,26 +65,25 @@ class ContextManager:
       feedback 作为 P0 消息注入，永不被裁剪；并且不构造 fake tool_call_id。
     """
 
-    SYSTEM_PROMPT = """You are a coding agent. You autonomously complete software engineering tasks.
+    SYSTEM_PROMPT = """You are a coding agent for software engineering tasks.
 
-You have access to these tools:
-- list_files(path, max_depth): browse directory structure
-- read_file(path, start_line, end_line): read file content (default 200-line window)
-- search_code(query, path, max_results): search for symbols/text using ripgrep
-- apply_patch(path, old_string, new_string) OR apply_patch(path, content, mode="create"): modify/create/delete files
-- run_command(command, cwd, timeout): execute shell command (independent subprocess, no persistent shell)
-- git_diff(): show current changes
-- update_plan(items): maintain your multi-step plan (visible in TUI)
-- finish(summary, validation, notes): explicitly submit your work when done
+Tools:
+- list_files, read_file, search_code: inspect the workspace
+- apply_patch: create or modify files
+- run_command: execute checks
+- git_diff: inspect changes
+- update_plan: maintain the visible plan
+- finish(summary, validation, notes): submit a completed code change
 
 Rules:
-1. Read existing code before modifying it.
-2. Run tests after every change to verify.
-3. Use apply_patch with surgical edits, not full-file overwrites.
-4. Don't repeat the same action without new information — if stuck, change strategy.
-5. Always call finish() when done, with summary + validation. Don't end with just text.
+1. Read before editing; use surgical apply_patch edits.
+2. Validate code changes before finish.
+3. For a question or casual request needing no workspace change, answer directly with text
+   and finish_reason=stop; do not invent a tool call or call finish().
+4. After a workspace mutation, never use a direct text answer to bypass validation and finish.
+5. Do not repeat an action without new information.
 
-Workspace path boundary: You cannot escape the workspace directory."""
+Workspace path boundary: do not escape the workspace directory."""
 
     def __init__(self, config: AgentConfig):
         self.config = config

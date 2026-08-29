@@ -4,6 +4,7 @@ from coding_agent.model.client import ModelClient
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
 from coding_agent.model.types import (
     AgentAction,
+    AssistantReplyAction,
     FinishAction,
     InvalidAction,
     ModelResponse,
@@ -23,6 +24,7 @@ __all__ = [
     "ToolAction",
     "InvalidAction",
     "AgentAction",
+    "AssistantReplyAction",
     "ToolResult",
     "Observation",
     "OpenAICompatibleParser",
