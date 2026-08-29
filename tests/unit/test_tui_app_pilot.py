@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from textual.widgets import Input
 
+from coding_agent.agent.loop import AgentRunResult
 from coding_agent.events import (
     AgentEvent,
     AssistantReplied,
@@ -22,7 +23,7 @@ from coding_agent.events import (
     ToolStarted,
 )
 from coding_agent.tui.app import CodingAgentApp
-from coding_agent.tui.bridge import UiAgentEvent
+from coding_agent.tui.bridge import AgentWorkerResult, UiAgentEvent
 from coding_agent.tui.state import ToolUiStatus
 from coding_agent.tui.widgets import (
     AssistantMessageWidget,
@@ -126,6 +127,21 @@ async def test_assistant_reply_renders_and_reenables_input(tmp_path: Path) -> No
             ),
         ))
         assert len(app.query(AssistantMessageWidget)) == 1
+        # Card C: RunFinished alone must NOT enable the Input. The worker
+        # thread still has ``session.complete_run`` to finish. Only the
+        # ``AgentWorkerResult`` message that the worker posts after
+        # ``agent_run`` returns may re-enable the composer.
+        assert app.query_one(Input).disabled
+        app.post_message(AgentWorkerResult(AgentRunResult(
+            summary="你好，世界",
+            validation="",
+            stop_reason="assistant_reply",
+            steps=0,
+            total_tokens=0,
+            duration=0.0,
+            reply="你好，世界",
+        )))
+        await pilot.pause()
         assert not app.query_one(Input).disabled
 
 
@@ -157,6 +173,18 @@ async def test_assistant_reply_renders_and_reenables_input(tmp_path: Path) -> No
         )
         assert len(app.query(FinalResultWidget)) == 1
         assert app.query_one(FinalResultWidget) is final
+        # Card C: same contract — RunFinished keeps the Input disabled until
+        # the worker thread returns.
+        assert app.query_one(Input).disabled
+        app.post_message(AgentWorkerResult(AgentRunResult(
+            summary="done",
+            validation="",
+            stop_reason="finish",
+            steps=1,
+            total_tokens=0,
+            duration=0.0,
+        )))
+        await pilot.pause()
         assert not app.query_one(Input).disabled
         await pilot.pause()
 

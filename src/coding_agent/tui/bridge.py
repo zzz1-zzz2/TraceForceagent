@@ -16,6 +16,7 @@ from coding_agent.agent.loop import run as agent_run
 from coding_agent.config import AgentConfig
 from coding_agent.emitter import EventEmitter
 from coding_agent.events import AgentEvent
+from coding_agent.session import AgentSession
 
 _log = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ class AgentWorker:
         task: str,
         workspace: Path,
         config: AgentConfig,
+        session: AgentSession,
         task_mode: TaskMode | str | None = None,
         run_fn: Callable[..., AgentRunResult] = agent_run,
         thread_factory: Callable[..., threading.Thread] = threading.Thread,
@@ -91,6 +93,7 @@ class AgentWorker:
         self.task = task
         self.workspace = workspace
         self.config = config
+        self.session = session
         self.task_mode = task_mode
         self.run_fn = run_fn
         self.thread_factory = thread_factory
@@ -124,6 +127,7 @@ class AgentWorker:
                 config=self.config,
                 emitter=self.emitter,
                 task_mode=self.task_mode,
+                session=self.session,
             )
         except Exception as exc:
             self._post(AgentWorkerError(exc))

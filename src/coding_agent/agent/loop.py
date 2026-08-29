@@ -6,6 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from coding_agent.agent.brief import TaskBrief, TaskMode
 from coding_agent.agent.finish_policy import FinishPolicy, classify_validation
@@ -15,8 +16,8 @@ from coding_agent.config import AgentConfig
 from coding_agent.context.manager import ContextManager
 from coding_agent.emitter import EventEmitter
 from coding_agent.events import (
-    FeedbackRecorded,
     AssistantReplied,
+    FeedbackRecorded,
     FinishAccepted,
     ModelCompleted,
     ModelFailed,
@@ -39,6 +40,7 @@ from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
 from coding_agent.model.types import AgentAction, AssistantReplyAction, FinishAction, ToolResult
 from coding_agent.recovery.failure_refresh import FailureAwareRefresher
 from coding_agent.runtime.local import LocalRuntime
+from coding_agent.session import AgentSession, PreviousRunSnapshot
 from coding_agent.tools.registry import default_registry
 from coding_agent.trajectory import TrajectoryEventSink, TrajectoryLogger
 from coding_agent.workspace.tracker import WorkspaceChangeTracker
@@ -56,6 +58,18 @@ class AgentRunResult:
     duration: float
     reply: str | None = None
     trajectory_path: Path | None = None
+    modified_files: tuple[str, ...] = ()
+    findings: tuple[str, ...] = ()
+    final_state: RunStateSnapshot | None = None
+
+
+class _LoopFailure(Exception):
+    """Carry the original loop error and its best terminal state outward."""
+
+    def __init__(self, error: Exception, final_state: RunStateSnapshot) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.final_state = final_state
 
 
 def _snapshot(state: AgentState, *, reason: str = "") -> RunStateSnapshot:
@@ -66,10 +80,12 @@ def _snapshot(state: AgentState, *, reason: str = "") -> RunStateSnapshot:
         summary=state.finish_summary or state.reply_text or "",
         validation=state.finish_validation or "",
         validation_skipped_reason=state.finish_validation_skipped_reason or "",
+        notes=state.finish_notes or "",
         reply=state.reply_text or "",
         steps=state.step_count,
         total_tokens=state.total_tokens(),
         modified_files=tuple(sorted(state.modified_files)),
+        findings=tuple(state.current_findings[-10:]),
     )
 
 
@@ -80,36 +96,178 @@ def run(
     emitter: EventEmitter | None = None,
     task_mode: TaskMode | str | None = None,
     trajectory_sink: TrajectoryEventSink | None = None,
+    session: AgentSession | None = None,
 ) -> AgentRunResult:
-    """Run the event-only loop and assemble the default trajectory subscriber.
-
-    The loop itself never creates, writes, or closes a ``TrajectoryLogger``.
-    Injected sinks are observed but not owned by this compatibility wrapper.
-    """
+    """Run one turn, optionally recording it in an :class:`AgentSession`."""
     events = emitter or EventEmitter()
+    active_session = session or AgentSession(workspace)
+    session_run = active_session.begin_run(task)
+    run_id = session_run.run_id
     owns_sink = trajectory_sink is None
-    run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-    if trajectory_sink is None:
-        logger = TrajectoryLogger(run_id=run_id, workspace=workspace, trace_root=config.trace_root)
-        trajectory_sink = TrajectoryEventSink(logger)
-    else:
-        run_id = getattr(getattr(trajectory_sink, "logger", None), "run_id", run_id)
-    events.subscribe(trajectory_sink, critical=True, prepend=True)
-    trajectory_path = trajectory_sink.path
     try:
-        return _run_loop(
-            task=task,
-            workspace=workspace,
-            config=config,
-            events=events,
-            task_mode=task_mode,
-            trajectory_path=trajectory_path,
+        active_session.record_user(task, run_id=run_id)
+        if trajectory_sink is None:
+            logger = TrajectoryLogger(
+                run_id=run_id,
+                workspace=workspace,
+                trace_root=config.trace_root,
+            )
+            trajectory_sink = TrajectoryEventSink(logger)
+        events.subscribe(trajectory_sink, critical=True, prepend=True)
+        trajectory_path = trajectory_sink.path
+        events.emit(RunStarted(
             run_id=run_id,
+            session_id=active_session.session_id,
+            task=task,
+            workspace=str(workspace),
+        ))
+        try:
+            result = _run_loop(
+                task=task,
+                workspace=workspace,
+                config=config,
+                events=events,
+                task_mode=task_mode,
+                trajectory_path=trajectory_path,
+                run_id=run_id,
+                session_id=active_session.session_id,
+                session=active_session,
+            )
+        except _LoopFailure as failure:
+            _finalize_failed_run(
+                active_session,
+                session_run,
+                failure.error,
+                failure.final_state,
+                events,
+                run_id,
+            )
+            raise failure.error from failure.error
+        except Exception as exc:
+            # Initialization failures happen before AgentState exists. The outer
+            # coordinator still closes the Session and publishes one terminal event.
+            final_state = RunStateSnapshot(status="ERROR", reason=type(exc).__name__)
+            _finalize_failed_run(
+                active_session, session_run, exc, final_state, events, run_id
+            )
+            raise
+
+        # Session persistence is the commit point: observers must not see success
+        # until the terminal snapshot and active-run release have both succeeded.
+        committed = active_session.complete_run(
+            session_run,
+            result,
+            reason=result.stop_reason,
         )
+        result.final_state = RunStateSnapshot(
+            status=committed.status or "COMPLETED",
+            reason=committed.reason or result.stop_reason,
+            summary=committed.summary,
+            validation=committed.validation,
+            validation_skipped_reason=committed.validation_skipped_reason,
+            notes=committed.notes,
+            reply=result.reply or "",
+            steps=committed.steps,
+            total_tokens=committed.total_tokens,
+            modified_files=committed.modified_files,
+            findings=committed.findings,
+        )
+        try:
+            events.emit(RunFinished(
+                run_id=run_id,
+                session_id=active_session.session_id,
+                final_state=result.final_state,
+            ))
+        except Exception as delivery_error:
+            # The Session is already committed. Publish the sole observable
+            # terminal fallback without changing that committed outcome.
+            try:
+                events.emit(RunFailed(
+                    run_id=run_id,
+                    session_id=active_session.session_id,
+                    error_type=type(delivery_error).__name__,
+                    error=str(delivery_error),
+                    final_state=result.final_state or RunStateSnapshot(
+                        status="COMPLETED", reason=result.stop_reason
+                    ),
+                ))
+            except Exception:
+                pass
+            raise
+        return result
+    except _LoopFailure:
+        raise
+    except Exception as exc:
+        # complete_run or terminal delivery failed. A failed commit releases its
+        # guard in AgentSession; only publish failure if no terminal was emitted.
+        if active_session.is_active:
+            _finalize_failed_run(
+                active_session,
+                session_run,
+                exc,
+                RunStateSnapshot(status="ERROR", reason=type(exc).__name__),
+                events,
+                run_id,
+            )
+        raise
     finally:
-        if owns_sink:
+        if owns_sink and trajectory_sink is not None:
             events.unsubscribe(trajectory_sink)
             trajectory_sink.close()
+
+
+def _finalize_failed_run(
+    session: AgentSession,
+    session_run: Any,
+    error: Exception,
+    final_state: RunStateSnapshot,
+    events: EventEmitter,
+    run_id: str,
+) -> None:
+    """Persist failure before exposing the matching terminal lifecycle event."""
+    try:
+        committed = session.fail_run(session_run, error, snapshot=PreviousRunSnapshot(
+            run_id=run_id,
+            outcome="failed",
+            reason=final_state.reason or type(error).__name__,
+            summary=final_state.summary,
+            validation=final_state.validation,
+            notes=final_state.notes,
+            validation_skipped_reason=final_state.validation_skipped_reason,
+            error=str(error),
+            modified_files=final_state.modified_files,
+            findings=final_state.findings,
+            steps=final_state.steps,
+            total_tokens=final_state.total_tokens,
+            status="ERROR",
+        ))
+    except Exception:
+        # AgentSession releases its active guard even when finalization fails.
+        # Keep the original run error as the caller-visible exception.
+        return
+    try:
+        events.emit(RunFailed(
+            run_id=run_id,
+            session_id=session.session_id,
+            error_type=type(error).__name__,
+            error=str(error),
+            final_state=RunStateSnapshot(
+                status=committed.status or "ERROR",
+                reason=committed.reason or type(error).__name__,
+                summary=committed.summary,
+                validation=committed.validation,
+                notes=committed.notes,
+                validation_skipped_reason=committed.validation_skipped_reason,
+                reply=final_state.reply,
+                steps=committed.steps,
+                total_tokens=committed.total_tokens,
+                modified_files=committed.modified_files,
+                findings=committed.findings,
+            ),
+        ))
+    except Exception:
+        # Terminal delivery errors must not mask the original run exception.
+        return
 
 
 def _run_loop(
@@ -120,6 +278,8 @@ def _run_loop(
     task_mode: TaskMode | str | None = None,
     trajectory_path: Path | None = None,
     run_id: str | None = None,
+    session_id: str = "",
+    session: AgentSession | None = None,
 ) -> AgentRunResult:
     """Execute the AgentLoop; all observability is emitted as typed events."""
     start = time.time()
@@ -160,7 +320,6 @@ def _run_loop(
         active_turn = None
 
     try:
-        events.emit(RunStarted(run_id=run_id, task=task, workspace=str(workspace)))
         while True:
             should_stop, stop_reason, _ = termination.should_stop(state)
             if should_stop:
@@ -178,7 +337,19 @@ def _run_loop(
             turn_number += 1
             active_turn = turn_number
             events.emit(TurnStarted(run_id=run_id, turn=turn_number))
-            messages = context_manager.build(state, brief)
+            try:
+                messages = context_manager.build(
+                    state,
+                    brief,
+                    session=session,
+                    current_run_id=run_id,
+                )
+            except TypeError as exc:
+                # Keep compatibility with injected/monkeypatched legacy context
+                # managers that still implement build(state, brief).
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                messages = context_manager.build(state, brief)
             repeat_feedback = termination.get_repeated_action_feedback()
             if repeat_feedback:
                 messages.append({"role": "user", "content": f"[System Feedback] {repeat_feedback}"})
@@ -238,6 +409,8 @@ def _run_loop(
                     continue
 
                 state.mark_answered(action.reply_text)
+                if session is not None:
+                    session.record_assistant(action.reply_text, run_id=run_id)
                 events.emit(AssistantReplied(
                     run_id=run_id,
                     turn=turn_number,
@@ -249,9 +422,9 @@ def _run_loop(
                 break
 
             if isinstance(action, FinishAction):
-                accepted, feedback = finish_policy.check(state, action)
+                accepted, feedback_value = finish_policy.check(state, action)
                 if not accepted:
-                    fb_text = f"[FinishPolicy] {feedback}"
+                    fb_text = f"[FinishPolicy] {feedback_value}"
                     context_manager.record_feedback(fb_text)
                     state.consecutive_errors += 1
                     events.emit(FeedbackRecorded(
@@ -264,7 +437,7 @@ def _run_loop(
                     end_turn(turn_number, "finish_rejected")
                     continue
 
-                state.mark_finished(action.summary, action.validation, action.validation_skipped_reason)
+                state.mark_finished(action.summary, action.validation, action.validation_skipped_reason, action.notes)
                 events.emit(FinishAccepted(
                     run_id=run_id,
                     turn=turn_number,
@@ -314,6 +487,14 @@ def _run_loop(
 
             tool_step = state.step_count
             active_tool = (action, None, tool_step)
+            if session is not None:
+                session.record_tool_call(
+                    tool_call_id=action.action_id,
+                    tool_name=action.tool_name,
+                    arguments=action.arguments,
+                    content=action.preamble,
+                    run_id=run_id,
+                )
             events.emit(ToolStarted(
                 run_id=run_id,
                 turn=turn_number,
@@ -351,6 +532,15 @@ def _run_loop(
                     observation = tool.exception_observation(exc)
                     state.consecutive_errors += 1
             active_tool = (action, observation, tool_step)
+            if session is not None:
+                session.record_tool_result(
+                    tool_call_id=action.action_id,
+                    tool_name=action.tool_name,
+                    content=observation.content,
+                    success=observation.success,
+                    error=observation.error,
+                    run_id=run_id,
+                )
             workspace_change = workspace_tracker.diff_since(prev_snapshot)
 
             # Commit all core facts before announcing the tool's terminal event.
@@ -443,7 +633,6 @@ def _run_loop(
             state.mark_step_done()
             end_turn(turn_number, "completed")
 
-        events.emit(RunFinished(run_id=run_id, final_state=_snapshot(state)))
     except Exception as exc:
         if active_model:
             active_model = False
@@ -486,17 +675,7 @@ def _run_loop(
             except Exception:
                 pass
         state.status = "ERROR"
-        try:
-            events.emit(RunFailed(
-                run_id=run_id,
-                error_type=type(exc).__name__,
-                error=str(exc),
-                final_state=_snapshot(state, reason=type(exc).__name__),
-            ))
-        except Exception:
-            # Preserve the original exception if terminal persistence has failed.
-            pass
-        raise
+        raise _LoopFailure(exc, _snapshot(state, reason=type(exc).__name__)) from exc
 
     return AgentRunResult(
         summary=state.finish_summary or state.reply_text or "(no summary)",
@@ -507,4 +686,7 @@ def _run_loop(
         total_tokens=state.total_tokens(),
         duration=time.time() - start,
         trajectory_path=trajectory_path,
+        modified_files=tuple(sorted(state.modified_files)),
+        findings=tuple(state.current_findings[-10:]),
+        final_state=_snapshot(state),
     )

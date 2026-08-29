@@ -81,11 +81,13 @@ def event_to_record(event: AgentEvent) -> dict[str, Any]:
         payload["step"] = payload.get("step", final.get("steps", 0))
         payload.update(_legacy_terminal_fields(final))
     elif event_type == "run_finished":
+        payload.setdefault("session_id", "")
         final = payload.pop("final_state", {}) or {}
         payload["type"] = "stop" if final.get("status") == "STOPPED" else "run_finished"
         payload["step"] = final.get("steps", 0)
         payload.update(_legacy_terminal_fields(final))
     elif event_type == "run_failed":
+        payload.setdefault("session_id", "")
         final = payload.pop("final_state", {}) or {}
         payload["type"] = "error"
         payload["step"] = final.get("steps", 0)

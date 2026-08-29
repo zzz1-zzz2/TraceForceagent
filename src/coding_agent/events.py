@@ -134,6 +134,7 @@ class BaseEvent:
 @dataclass(frozen=True, kw_only=True)
 class RunStarted(BaseEvent):
     event_type: ClassVar[str] = "run_started"
+    session_id: str = ""
     task: str = ""
     workspace: str = ""
 
@@ -147,18 +148,22 @@ class RunStateSnapshot:
     summary: str = ""
     validation: str = ""
     validation_skipped_reason: str = ""
+    notes: str = ""
     reply: str = ""
     steps: int = 0
     total_tokens: int = 0
     modified_files: tuple[str, ...] = ()
+    findings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "modified_files", tuple(self.modified_files))
+        object.__setattr__(self, "findings", tuple(self.findings))
 
 
 @dataclass(frozen=True, kw_only=True)
 class RunFinished(BaseEvent):
     event_type: ClassVar[str] = "run_finished"
+    session_id: str = ""
     final_state: RunStateSnapshot = RunStateSnapshot()
 
     @property
@@ -175,6 +180,7 @@ class RunFinished(BaseEvent):
 @dataclass(frozen=True, kw_only=True)
 class RunFailed(BaseEvent):
     event_type: ClassVar[str] = "run_failed"
+    session_id: str = ""
     error_type: str = ""
     error: str = ""
     final_state: RunStateSnapshot = RunStateSnapshot()
