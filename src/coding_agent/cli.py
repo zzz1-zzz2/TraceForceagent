@@ -6,6 +6,8 @@ Commands:
 * ``python -m coding_agent run --task-file task.md --workspace ./repo``
 * ``python -m coding_agent tui [--workspace DIR]``
 * ``python -m coding_agent check``
+* ``python -m coding_agent config-show``
+* ``python -m coding_agent config-path``
 * ``python -m coding_agent --help``
 
 Global flags:
@@ -31,7 +33,13 @@ import typer
 from rich.console import Console
 
 from coding_agent import __version__
-from coding_agent.config import PROVIDER_IDS, AgentConfig, load_config
+from coding_agent.config import (
+    PROVIDER_IDS,
+    AgentConfig,
+    default_user_config_path,
+    load_config,
+    run_preflight,
+)
 from coding_agent.model.client import MissingCredentialsError
 
 app = typer.Typer(
@@ -136,6 +144,19 @@ def _print_credentials_status(config: AgentConfig) -> None:
         )
 
 
+def _print_preflight(config: AgentConfig, *, workspace: Path | None = None) -> bool:
+    """Render the preflight result. Returns True iff every check passed."""
+    result = run_preflight(config, workspace=workspace, require_credentials=True)
+    for line in result.summary_lines():
+        if line.startswith("✗"):
+            console.print(f"[red]{line}[/red]")
+        elif line.startswith("✓"):
+            console.print(f"[green]{line}[/green]")
+        else:
+            console.print(line)
+    return result.ok
+
+
 @app.command()
 def run(
     ctx: typer.Context,
@@ -231,25 +252,21 @@ def tui(
 
 
 @app.command()
-def check(ctx: typer.Context) -> None:
-    """Check environment configuration (API key, dependencies)."""
+def check(
+    ctx: typer.Context,
+    workspace: Path = typer.Option(
+        Path("./workspace"), "--workspace", "-w", help="Workspace directory"
+    ),
+) -> None:
+    """Run the unified preflight (provider/model/url/key, workspace, git, rg)."""
     env_file: Path | None = ctx.obj.get("env_file") if ctx.obj else None
     provider: str | None = ctx.obj.get("provider") if ctx.obj else None
 
     config = _resolve_config(env_file, provider)
     _print_credentials_status(config)
-
-    import shutil
-
-    if shutil.which("rg"):
-        console.print("[green]✓[/green] ripgrep installed")
-    else:
-        console.print("[red]✗[/red] ripgrep not installed (sudo apt install ripgrep)")
-
-    if shutil.which("git"):
-        console.print("[green]✓[/green] git installed")
-    else:
-        console.print("[red]✗[/red] git not installed")
+    ok = _print_preflight(config, workspace=workspace)
+    if not ok:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -267,6 +284,21 @@ def config_show(ctx: typer.Context) -> None:
     console.print(f"[bold]api_key_present[/bold]    {'yes' if config.api_key else 'no'}")
     console.print(f"[bold]workspace_root[/bold]     {config.workspace_root}")
     console.print(f"[bold]trace_root[/bold]         {config.trace_root}")
+    console.print(
+        f"[bold]user_config[/bold]       {config.user_config_path} "
+        f"({config.user_config_source})"
+    )
+
+
+@app.command(name="config-path")
+def config_path(ctx: typer.Context) -> None:
+    """Print the resolved user-level config path (no values, just the path)."""
+    env_file: Path | None = ctx.obj.get("env_file") if ctx.obj else None
+    provider: str | None = ctx.obj.get("provider") if ctx.obj else None
+
+    config = _resolve_config(env_file, provider)
+    exists_marker = "exists" if config.user_config_path.exists() else "missing"
+    console.print(f"{config.user_config_path} ({exists_marker})")
 
 
 if __name__ == "__main__":

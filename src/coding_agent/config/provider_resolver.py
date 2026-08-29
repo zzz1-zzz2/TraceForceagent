@@ -97,6 +97,13 @@ CROSS_PROVIDER_ENV = "TRACEFORCE_API_KEY"
 class ResolvedCredentials:
     """Outcome of resolving credentials for a provider.
 
+    This dataclass is also surfaced to callers as :data:`ProviderProfile`:
+    it captures the active provider, the chosen model and base URL, the
+    resolved API key, and the source of that key. Keeping provider, model,
+    URL and credential source glued together is what stops TraceForce from
+    ever splicing "the first key we found" onto a different provider's
+    endpoint.
+
     ``api_key`` may be empty; callers should inspect ``source`` and ``present``
     before constructing an HTTP client.
     """
@@ -112,6 +119,12 @@ class ResolvedCredentials:
     @property
     def present(self) -> bool:
         return bool(self.api_key)
+
+
+# Canonical public name for the resolved provider configuration. Aliases
+# ``ResolvedCredentials`` so older callers keep working while new code
+# references the profile-shaped name.
+ProviderProfile = ResolvedCredentials
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -224,6 +237,7 @@ __all__ = [
     "CredentialSource",
     "PROVIDER_IDS",
     "PROVIDERS",
+    "ProviderProfile",
     "ProviderSpec",
     "ResolvedCredentials",
     "resolve_credentials",

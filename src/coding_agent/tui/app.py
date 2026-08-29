@@ -11,6 +11,7 @@ from textual.widget import Widget
 from textual.widgets import Input
 
 from coding_agent import __version__
+from coding_agent.config import load_config, run_preflight
 from coding_agent.events import (
     FeedbackRecorded,
     FinishAccepted,
@@ -89,7 +90,36 @@ class CodingAgentApp(App):
         await self._transcript().append_entry(self._welcome)
         self._status().apply_state(self._ui_state)
         self._footer().apply_state(self._ui_state)
+        await self._run_mount_preflight()
         self.query_one("#input", Input).focus()
+
+    async def _run_mount_preflight(self) -> None:
+        """Run a credentials-less preflight on mount and surface failures.
+
+        We deliberately skip the credentials check on mount — most users
+        open the TUI before typing a task. The hardened re-check lives in
+        :meth:`run_agent`.
+        """
+        try:
+            config = load_config()
+        except Exception as exc:  # noqa: BLE001 - surface redacted message
+            await self._append(
+                NoticeWidget(f"config load failed: {exc}", level="error")
+            )
+            return
+        result = run_preflight(
+            config,
+            workspace=self._workspace,
+            require_credentials=False,
+        )
+        if not result.ok:
+            names = ", ".join(result.failing_names())
+            await self._append(
+                NoticeWidget(
+                    f"preflight failed: {names} — see `coding-agent check`",
+                    level="system",
+                )
+            )
 
     def _transcript(self) -> TranscriptView:
         return self.query_one("#transcript", TranscriptView)
@@ -176,10 +206,26 @@ class CodingAgentApp(App):
             await self._append(NoticeWidget("当前任务仍在运行；追加指令将在 Session 阶段开放", level="system"))
             return
 
-        from coding_agent.config import load_config
-
         config = load_config()
         config.workspace_root = self._workspace
+
+        # Hard preflight gate: never spin up a worker with a broken setup.
+        result = run_preflight(
+            config,
+            workspace=self._workspace,
+            require_credentials=True,
+        )
+        if not result.ok:
+            names = ", ".join(result.failing_names())
+            await self._append(
+                NoticeWidget(
+                    f"preflight failed: {names}. Run `coding-agent check`.",
+                    level="error",
+                )
+            )
+            self._status().update("✗ preflight failed")
+            return
+
         self._ui_state = initial_ui_state()
         self.query_one("#input", Input).disabled = True
         self._worker = AgentWorker(
@@ -297,7 +343,6 @@ class CodingAgentApp(App):
         input_widget.disabled = True
         self._status().update("✻ chat…")
         try:
-            from coding_agent.config import load_config
             from coding_agent.model.client import ModelClient
 
             client = ModelClient.from_config(load_config())

@@ -7,6 +7,7 @@ to invoke the app and inspect both the rendered output and exit code.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,14 @@ from typer.testing import CliRunner
 from coding_agent.cli import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _fake_required_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend git and rg are installed so preflight passes in CI."""
+    monkeypatch.setattr(
+        shutil, "which", lambda name: f"/usr/bin/{name}" if name in {"git", "rg"} else None
+    )
 
 
 def test_check_reports_missing_credentials_cleanly(
@@ -30,7 +39,9 @@ def test_check_reports_missing_credentials_cleanly(
     (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=poisoned\n", encoding="utf-8")
 
     result = runner.invoke(app, ["check"])
-    assert result.exit_code == 0
+    # Missing credentials must exit non-zero so CI can detect the misconfig
+    # without scraping stdout. The redacted message is still printed first.
+    assert result.exit_code == 1
     assert "no API key resolved" in result.stdout
     # The workspace .env must NOT have leaked into the resolved config.
     assert "poisoned" not in result.stdout
@@ -84,7 +95,8 @@ def test_check_provider_switch_ignores_other_provider_keys(
     monkeypatch.delenv("TRACEFORCE_API_KEY", raising=False)
 
     result = runner.invoke(app, ["--provider", "glm", "check"])
-    assert result.exit_code == 0
+    # glm has no key, so preflight fails and check exits non-zero.
+    assert result.exit_code == 1
     assert "no API key resolved" in result.stdout
 
 
