@@ -42,7 +42,9 @@ jobs:
             src/coding_agent/tui/bridge.py \
             src/coding_agent/tui/state.py \
             src/coding_agent/tui/app.py \
-            src/coding_agent/tui/widgets.py
+            src/coding_agent/tui/widgets.py \
+            src/coding_agent/tui/formatting.py \
+            src/coding_agent/tui/presenters.py
 
       - name: Smoke-check CLI loads
         # 不依赖 ripgrep / API key,只验证 CLI module 能正常 import + typer

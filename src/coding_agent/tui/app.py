@@ -6,6 +6,7 @@ import asyncio
 from pathlib import Path
 
 from textual.app import App, ComposeResult
+from textual.events import Key
 from textual.widget import Widget
 from textual.widgets import Input
 
@@ -51,6 +52,7 @@ class CodingAgentApp(App):
     BINDINGS = [
         ("ctrl+c", "quit", "Quit"),
         ("ctrl+l", "clear_log", "Clear"),
+        ("ctrl+o", "toggle_tools", "Expand/collapse tools"),
     ]
 
     TITLE = "TraceForce Agent"
@@ -322,3 +324,17 @@ class CodingAgentApp(App):
     def action_clear_log(self) -> None:
         """Clear the component transcript, preserving the composer."""
         self.call_after_refresh(self._reset_transcript)
+
+    def action_toggle_tools(self) -> None:
+        """Expand all tool cards, or collapse them when already expanded."""
+        if not self._tool_widgets:
+            return
+        expand = any(not widget.expanded for widget in self._tool_widgets.values())
+        for widget in self._tool_widgets.values():
+            widget.set_expanded(expand)
+
+    async def on_key(self, event: Key) -> None:
+        """Return focus to the composer on Escape without cancelling a run."""
+        if event.key == "escape":
+            self.query_one("#input", Input).focus()
+            event.stop()

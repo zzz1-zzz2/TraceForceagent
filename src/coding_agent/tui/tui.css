@@ -48,8 +48,13 @@ Vertical.assistant-message {
     border-left: tall #67ddea;
 }
 
-.tool-execution.running {
-    border-left: tall #a78bfa;
+.tool-execution:focus {
+    background: #2a2d3a;
+    border-left: tall #67ddea;
+}
+
+.tool-execution.expanded {
+    background: #252833;
 }
 
 .tool-execution.success, .passed {

@@ -63,7 +63,6 @@ class ToolUiState:
     is_runtime_error: bool = False
     sequence_started: int = 0
     sequence_completed: int = 0
-    expanded: bool = False
 
     @property
     def key(self) -> ToolKey:
@@ -239,7 +238,6 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             step=event.step,
             status=ToolUiStatus.RUNNING,
             sequence_started=event.sequence,
-            expanded=previous.expanded if previous else False,
         )
         return replace(state, phase="working", turn=event.turn, step=event.step, tools=tools)
 
@@ -373,7 +371,6 @@ def _reduce_tool_terminal(
         is_runtime_error=result.is_runtime_error if result is not None else False,
         sequence_started=previous.sequence_started if previous else 0,
         sequence_completed=event.sequence,
-        expanded=previous.expanded if previous else False,
     )
     return replace(state, phase="working", turn=event.turn, step=event.step, tools=tools)
 
