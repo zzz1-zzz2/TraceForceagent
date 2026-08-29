@@ -39,6 +39,7 @@ from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
 from coding_agent.model.types import AgentAction, AssistantReplyAction, FinishAction, ToolResult
 from coding_agent.recovery.failure_refresh import FailureAwareRefresher
 from coding_agent.runtime.local import LocalRuntime
+from coding_agent.session import AgentSession, PreviousRunSnapshot, SessionRun
 from coding_agent.tools.registry import default_registry
 from coding_agent.trajectory import TrajectoryEventSink, TrajectoryLogger
 from coding_agent.workspace.tracker import WorkspaceChangeTracker
@@ -56,6 +57,8 @@ class AgentRunResult:
     duration: float
     reply: str | None = None
     trajectory_path: Path | None = None
+    modified_files: tuple[str, ...] = ()
+    findings: tuple[str, ...] = ()
 
 
 def _snapshot(state: AgentState, *, reason: str = "") -> RunStateSnapshot:
@@ -70,6 +73,7 @@ def _snapshot(state: AgentState, *, reason: str = "") -> RunStateSnapshot:
         steps=state.step_count,
         total_tokens=state.total_tokens(),
         modified_files=tuple(sorted(state.modified_files)),
+        findings=tuple(state.current_findings[-10:]),
     )
 
 
@@ -80,24 +84,26 @@ def run(
     emitter: EventEmitter | None = None,
     task_mode: TaskMode | str | None = None,
     trajectory_sink: TrajectoryEventSink | None = None,
+    session: AgentSession | None = None,
 ) -> AgentRunResult:
-    """Run the event-only loop and assemble the default trajectory subscriber.
-
-    The loop itself never creates, writes, or closes a ``TrajectoryLogger``.
-    Injected sinks are observed but not owned by this compatibility wrapper.
-    """
+    """Run one turn, optionally recording it in an :class:`AgentSession`."""
     events = emitter or EventEmitter()
+    active_session = session or AgentSession(workspace)
+    session_run = active_session.begin_run(task)
+    run_id = session_run.run_id
     owns_sink = trajectory_sink is None
-    run_id = f"run_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-    if trajectory_sink is None:
-        logger = TrajectoryLogger(run_id=run_id, workspace=workspace, trace_root=config.trace_root)
-        trajectory_sink = TrajectoryEventSink(logger)
-    else:
-        run_id = getattr(getattr(trajectory_sink, "logger", None), "run_id", run_id)
-    events.subscribe(trajectory_sink, critical=True, prepend=True)
-    trajectory_path = trajectory_sink.path
     try:
-        return _run_loop(
+        active_session.record_user(task, run_id=run_id)
+        if trajectory_sink is None:
+            logger = TrajectoryLogger(
+                run_id=run_id,
+                workspace=workspace,
+                trace_root=config.trace_root,
+            )
+            trajectory_sink = TrajectoryEventSink(logger)
+        events.subscribe(trajectory_sink, critical=True, prepend=True)
+        trajectory_path = trajectory_sink.path
+        result = _run_loop(
             task=task,
             workspace=workspace,
             config=config,
@@ -105,9 +111,25 @@ def run(
             task_mode=task_mode,
             trajectory_path=trajectory_path,
             run_id=run_id,
+            session_id=active_session.session_id,
+            session=active_session,
         )
+        # RunFinished persistence succeeded before the Session is marked complete.
+        active_session.complete_run(
+            session_run,
+            result,
+            reason=result.stop_reason,
+        )
+        return result
+    except Exception as exc:
+        # A failed terminal event or setup error must never leave the Session active.
+        try:
+            active_session.fail_run(session_run, exc)
+        except Exception:
+            pass
+        raise
     finally:
-        if owns_sink:
+        if owns_sink and trajectory_sink is not None:
             events.unsubscribe(trajectory_sink)
             trajectory_sink.close()
 
@@ -120,6 +142,8 @@ def _run_loop(
     task_mode: TaskMode | str | None = None,
     trajectory_path: Path | None = None,
     run_id: str | None = None,
+    session_id: str = "",
+    session: AgentSession | None = None,
 ) -> AgentRunResult:
     """Execute the AgentLoop; all observability is emitted as typed events."""
     start = time.time()
@@ -160,7 +184,12 @@ def _run_loop(
         active_turn = None
 
     try:
-        events.emit(RunStarted(run_id=run_id, task=task, workspace=str(workspace)))
+        events.emit(RunStarted(
+            run_id=run_id,
+            session_id=session_id,
+            task=task,
+            workspace=str(workspace),
+        ))
         while True:
             should_stop, stop_reason, _ = termination.should_stop(state)
             if should_stop:
@@ -178,7 +207,19 @@ def _run_loop(
             turn_number += 1
             active_turn = turn_number
             events.emit(TurnStarted(run_id=run_id, turn=turn_number))
-            messages = context_manager.build(state, brief)
+            try:
+                messages = context_manager.build(
+                    state,
+                    brief,
+                    session=session,
+                    current_run_id=run_id,
+                )
+            except TypeError as exc:
+                # Keep compatibility with injected/monkeypatched legacy context
+                # managers that still implement build(state, brief).
+                if "unexpected keyword argument" not in str(exc):
+                    raise
+                messages = context_manager.build(state, brief)
             repeat_feedback = termination.get_repeated_action_feedback()
             if repeat_feedback:
                 messages.append({"role": "user", "content": f"[System Feedback] {repeat_feedback}"})
@@ -238,6 +279,8 @@ def _run_loop(
                     continue
 
                 state.mark_answered(action.reply_text)
+                if session is not None:
+                    session.record_assistant(action.reply_text, run_id=run_id)
                 events.emit(AssistantReplied(
                     run_id=run_id,
                     turn=turn_number,
@@ -265,6 +308,19 @@ def _run_loop(
                     continue
 
                 state.mark_finished(action.summary, action.validation, action.validation_skipped_reason)
+                if session is not None:
+                    session.record_message(
+                        "assistant",
+                        "[finish] " + action.summary,
+                        run_id=run_id,
+                        tool_name="finish",
+                        arguments={
+                            "summary": action.summary,
+                            "validation": action.validation,
+                            "notes": action.notes,
+                            "validation_skipped_reason": action.validation_skipped_reason,
+                        },
+                    )
                 events.emit(FinishAccepted(
                     run_id=run_id,
                     turn=turn_number,
@@ -314,6 +370,14 @@ def _run_loop(
 
             tool_step = state.step_count
             active_tool = (action, None, tool_step)
+            if session is not None:
+                session.record_tool_call(
+                    tool_call_id=action.action_id,
+                    tool_name=action.tool_name,
+                    arguments=action.arguments,
+                    content=action.preamble,
+                    run_id=run_id,
+                )
             events.emit(ToolStarted(
                 run_id=run_id,
                 turn=turn_number,
@@ -351,6 +415,15 @@ def _run_loop(
                     observation = tool.exception_observation(exc)
                     state.consecutive_errors += 1
             active_tool = (action, observation, tool_step)
+            if session is not None:
+                session.record_tool_result(
+                    tool_call_id=action.action_id,
+                    tool_name=action.tool_name,
+                    content=observation.content,
+                    success=observation.success,
+                    error=observation.error,
+                    run_id=run_id,
+                )
             workspace_change = workspace_tracker.diff_since(prev_snapshot)
 
             # Commit all core facts before announcing the tool's terminal event.
@@ -443,7 +516,11 @@ def _run_loop(
             state.mark_step_done()
             end_turn(turn_number, "completed")
 
-        events.emit(RunFinished(run_id=run_id, final_state=_snapshot(state)))
+        events.emit(RunFinished(
+            run_id=run_id,
+            session_id=session_id,
+            final_state=_snapshot(state),
+        ))
     except Exception as exc:
         if active_model:
             active_model = False
@@ -489,6 +566,7 @@ def _run_loop(
         try:
             events.emit(RunFailed(
                 run_id=run_id,
+                session_id=session_id,
                 error_type=type(exc).__name__,
                 error=str(exc),
                 final_state=_snapshot(state, reason=type(exc).__name__),
@@ -507,4 +585,6 @@ def _run_loop(
         total_tokens=state.total_tokens(),
         duration=time.time() - start,
         trajectory_path=trajectory_path,
+        modified_files=tuple(sorted(state.modified_files)),
+        findings=tuple(state.current_findings[-10:]),
     )

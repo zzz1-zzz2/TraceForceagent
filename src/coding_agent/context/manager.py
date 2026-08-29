@@ -26,6 +26,7 @@ from coding_agent.agent.state import AgentState
 from coding_agent.config import AgentConfig
 from coding_agent.context.working_state import WorkingStateBuilder
 from coding_agent.model.types import ToolResult
+from coding_agent.session import AgentSession, PreviousRunSnapshot
 
 
 _log = logging.getLogger(__name__)
@@ -119,7 +120,13 @@ Workspace path boundary: do not escape the workspace directory."""
         # 消息结构开销约 4 tokens
         return self._count_tokens(text) + 4
 
-    def build(self, state: AgentState, brief: TaskBrief) -> list[dict[str, Any]]:
+    def build(
+        self,
+        state: AgentState,
+        brief: TaskBrief,
+        session: AgentSession | None = None,
+        current_run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """构造完整 Active Context messages，按 token 预算裁剪。"""
         # 1) 构造候选 messages（按优先级标记）
         candidates: list[tuple[str, dict]] = []  # (priority, message)
@@ -136,10 +143,18 @@ Workspace path boundary: do not escape the workspace directory."""
         candidates.append(("P0", {"role": "user", "content": f"# Task\n{state.original_task}"}))
 
         # P1: Task Brief
-        candidates.append(("P1", {"role": "assistant", "content": brief.to_text()}))
+        brief_text = brief.to_text()
+        # In a Session-aware run, the original task has one canonical prompt
+        # location (the P0 ``# Task`` message). Derived sections must not copy
+        # it verbatim and accidentally turn one task into repeated instructions.
+        if session is not None:
+            brief_text = self._hide_current_task(brief_text, state.original_task)
+        candidates.append(("P1", {"role": "assistant", "content": brief_text}))
 
         # P1: Working State（每次重渲染）
         working_text = self.working_state_builder.render(state)
+        if session is not None:
+            working_text = self._hide_current_task(working_text, state.original_task)
         if working_text != "(no state yet)":
             candidates.append(("P1", {"role": "user", "content": working_text}))
 
@@ -164,40 +179,162 @@ Workspace path boundary: do not escape the workspace directory."""
         # 不可拆分的单元。必须两条都进入 Context，或两条都淘汰。
         # 否则保留 orphan assistant tool_call 会破坏 OpenAI tool calling 的不变量。
         recent = list(self._recent_turns)[-self.config.recent_turns:]
-        for idx, turn in enumerate(recent):
-            # 越近的越优先 P2，越远的降为 P3
-            priority = "P2" if idx >= len(recent) - 3 else "P3"
-            # 把一个 turn 包成 list[tuple[prio, msg]]，后面整体计算 token
-            candidates.append((priority, _TurnBundle(
-                assistant=(
-                    {
-                        "role": "assistant",
-                        "content": turn.assistant_content or "",
-                        "tool_calls": [
-                            {
-                                "id": turn.tool_call_id,
-                                "type": "function",
-                                "function": {
-                                    "name": turn.tool_call_name,
-                                    "arguments": _json_dumps(turn.tool_call_args),
-                                },
-                            }
-                        ],
-                    }
-                ),
-                tool=(
-                    {
-                        "role": "tool",
-                        "tool_call_id": turn.tool_call_id,
-                        "content": turn.tool_result_content,
-                    }
-                ),
-            )))
+        if session is not None:
+            candidates.extend(
+                self._session_candidates(
+                    session,
+                    current_run_id=current_run_id,
+                )
+            )
+        else:
+            for idx, turn in enumerate(recent):
+                # 越近的越优先 P2，越远的降为 P3
+                priority = "P2" if idx >= len(recent) - 3 else "P3"
+                # 把一个 turn 包成 list[tuple[prio, msg]]，后面整体计算 token
+                candidates.append((priority, _TurnBundle(
+                    assistant=(
+                        {
+                            "role": "assistant",
+                            "content": turn.assistant_content or "",
+                            "tool_calls": [
+                                {
+                                    "id": turn.tool_call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": turn.tool_call_name,
+                                        "arguments": _json_dumps(turn.tool_call_args),
+                                    },
+                                }
+                            ],
+                        }
+                    ),
+                    tool=(
+                        {
+                            "role": "tool",
+                            "tool_call_id": turn.tool_call_id,
+                            "content": turn.tool_result_content,
+                        }
+                    ),
+                )))
 
         # 2) 按 token 预算淘汰
         messages = self._pack_by_budget(candidates)
 
         return messages
+
+    def _hide_current_task(self, text: str, task: str) -> str:
+        """Remove an exact task echo from derived prompt sections."""
+        if not task:
+            return text
+        return text.replace(task, "[current task]")
+
+    def _session_candidates(
+        self,
+        session: AgentSession,
+        *,
+        current_run_id: str | None,
+    ) -> list[tuple[str, Any]]:
+        """Convert complete Session facts into bounded context candidates.
+
+        Session history is never changed here. Assistant tool calls are only
+        emitted when a matching tool result exists, preserving the API's
+        assistant-tool/result pairing invariant.
+        """
+        messages = session.messages
+        current_run_id = current_run_id or session.active_run_id
+        candidates: list[tuple[str, Any]] = []
+        consumed: set[int] = set()
+
+        for index, message in enumerate(messages):
+            if index in consumed:
+                continue
+            if message.role == "user" and message.run_id == current_run_id:
+                # The active task is already injected exactly once as P0
+                # ``# Task`` below; do not duplicate its Session fact.
+                continue
+            if message.role == "user":
+                candidates.append(("P3", {"role": "user", "content": message.content}))
+                continue
+            if message.role == "tool":
+                # Orphan results are not useful to the model and must not be
+                # emitted without their corresponding assistant tool call.
+                continue
+            if message.role != "assistant":
+                continue
+
+            if message.tool_call_id and message.tool_name:
+                if message.tool_name == "finish":
+                    arguments = _json_dumps(dict(message.arguments))
+                    content = message.content or f"[finish] {arguments}"
+                    candidates.append(("P2", {"role": "assistant", "content": content}))
+                    continue
+                result_index = next(
+                    (
+                        result_index
+                        for result_index in range(index + 1, len(messages))
+                        if messages[result_index].role == "tool"
+                        and messages[result_index].tool_call_id == message.tool_call_id
+                        and messages[result_index].run_id == message.run_id
+                    ),
+                    None,
+                )
+                if result_index is None:
+                    continue
+                result = messages[result_index]
+                consumed.add(result_index)
+                candidates.append(("P2", _TurnBundle(
+                    assistant={
+                        "role": "assistant",
+                        "content": message.content or "",
+                        "tool_calls": [{
+                            "id": message.tool_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": message.tool_name,
+                                "arguments": _json_dumps(dict(message.arguments)),
+                            },
+                        }],
+                    },
+                    tool={
+                        "role": "tool",
+                        "tool_call_id": message.tool_call_id,
+                        "content": result.tool_result or result.content,
+                    },
+                )))
+                continue
+
+            if message.content:
+                candidates.append(("P3", {"role": "assistant", "content": message.content}))
+
+        if session.snapshot is not None:
+            snapshot = session.snapshot
+            snapshot_text = self._snapshot_text(snapshot)
+            if snapshot_text:
+                candidates.append(("P2", {"role": "user", "content": snapshot_text}))
+        return candidates
+
+    def _snapshot_text(self, snapshot: PreviousRunSnapshot) -> str:
+        """Render the bounded previous-run summary without trajectory access."""
+        lines = [
+            "[Previous Run Snapshot]",
+            f"run_id: {snapshot.run_id}",
+            f"outcome: {snapshot.outcome}",
+        ]
+        for label, value in (
+            ("reason", snapshot.reason),
+            ("summary", snapshot.summary),
+            ("validation", snapshot.validation),
+            ("error", snapshot.error),
+            ("status", snapshot.status),
+        ):
+            if value:
+                lines.append(f"{label}: {value}")
+        if snapshot.modified_files:
+            lines.append(f"modified_files: {', '.join(snapshot.modified_files)}")
+        if snapshot.findings:
+            lines.append("findings:")
+            lines.extend(f"- {finding}" for finding in snapshot.findings)
+        return "\n".join(lines)
 
     def _pack_by_budget(
         self, candidates: list[tuple[str, Any]]
