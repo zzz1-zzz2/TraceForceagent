@@ -97,7 +97,7 @@ class AgentState:
     """每步的状态指纹，用于 stagnation 检测。内部字段，不导出。"""
 
     @classmethod
-    def initialize(cls, task: str, workspace: Path, task_mode: str = "existing_repository") -> "AgentState":
+    def initialize(cls, task: str, workspace: Path, task_mode: str = "existing_repository") -> AgentState:
         """初始化一个 AgentState。
 
         task_mode 由调用方决定（通常来自 TaskBrief.from_user_task 的启发式判定），
@@ -120,6 +120,23 @@ class AgentState:
     def record_modified(self, path: str) -> None:
         """记录修改过的文件。"""
         self.modified_files.add(path)
+
+    def record_workspace_change(
+        self, change, step: int
+    ) -> None:
+        """P2-1E.3：把 WorkspaceChangeTracker 检出的净变化合并到 AgentState。
+
+        ``change`` 是 ``coding_agent.workspace.tracker.WorkspaceChange``。
+        调用方负责在 tool 前后做快照比较；本方法只负责把真实变化落地到
+        modified_files / last_mutation_step / ready_to_finish，不再依赖
+        tool 名字猜测 mutation。
+        """
+        for path in change.all_paths():
+            self.modified_files.add(path)
+        # 任意真实净变化都重置 mutation step 与 ready_to_finish。
+        if change.has_changes:
+            self.last_mutation_step = max(self.last_mutation_step, step)
+            self.ready_to_finish = False
 
     def record_mutation(self, step: int) -> None:
         """记录最后一次 mutation 发生的 step（FinishPolicy 用）。

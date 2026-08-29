@@ -51,7 +51,7 @@ class TaskBrief:
         task: str,
         task_mode: TaskMode | str | None = None,
         workspace: Path | None = None,
-    ) -> "TaskBrief":
+    ) -> TaskBrief:
         """从用户原始输入构造。
 
         Explicit ``task_mode`` is authoritative. Without it, Greenfield is

@@ -40,6 +40,7 @@ from coding_agent.recovery.failure_refresh import FailureAwareRefresher
 from coding_agent.runtime.local import LocalRuntime
 from coding_agent.tools.registry import default_registry
 from coding_agent.trajectory import TrajectoryEventSink, TrajectoryLogger
+from coding_agent.workspace.tracker import WorkspaceChangeTracker
 
 
 @dataclass
@@ -145,6 +146,10 @@ def _run_loop(
     ))
     finish_policy = FinishPolicy()
     failure_refresher = FailureAwareRefresher(enabled=config.enable_failure_refresh)
+    # P2-1E.3：所有 tool 都共享一个 workspace 变化跟踪器，
+    # 真实净变化（shell / formatter / generator / untracked / permission）
+    # 都进入 modified_files，不再按 tool name 猜 mutation。
+    workspace_tracker = WorkspaceChangeTracker(workspace)
 
     def end_turn(turn: int, status: str) -> None:
         nonlocal active_turn
@@ -287,6 +292,11 @@ def _run_loop(
             ))
             tool = registry.get(action.tool_name)
             tool_exception: Exception | None = None
+            # P2-1E.3：所有 tool 前后做 workspace 快照比对，真实净变化
+            # 才是 mutation；不再按 tool name 猜。read_file / list_files /
+            # search_code 等只读工具理论上不会触发变化，但 cheap 防御性
+            # 保留 snapshot 仍然正确。
+            prev_snapshot = workspace_tracker.snapshot()
             if tool is None:
                 observation = ToolResult.fail(
                     f"Unknown tool: '{action.tool_name}'. Available tools: {', '.join(registry.names())}",
@@ -309,18 +319,20 @@ def _run_loop(
                     observation = tool.exception_observation(exc)
                     state.consecutive_errors += 1
             active_tool = (action, observation, tool_step)
+            workspace_change = workspace_tracker.diff_since(prev_snapshot)
 
             # Commit all core facts before announcing the tool's terminal event.
             state.step_count += 1
             state.tool_calls += 1
             state.record_action(action.tool_name, action.args_hash)
-            if action.tool_name in ("apply_patch", "patch"):
-                if observation.success and action.arguments.get("path"):
-                    path = str(action.arguments["path"])
-                    state.record_modified(path)
-                    state.add_finding(f"Modified {path}")
-                    state.record_mutation(state.step_count)
-            elif action.tool_name == "read_file":
+            # P2-1E.3：mutation 检测统一走 tracker。
+            if workspace_change.has_changes:
+                state.record_workspace_change(workspace_change, state.step_count)
+                for path in workspace_change.all_paths():
+                    state.add_finding(
+                        f"workspace change: {path} ({workspace_change.summary()})"
+                    )
+            if action.tool_name == "read_file":
                 if observation.success and action.arguments.get("path"):
                     state.record_inspected(str(action.arguments["path"]))
             elif action.tool_name == "search_code" and observation.success:
