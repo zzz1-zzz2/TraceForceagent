@@ -138,13 +138,6 @@ def test_session_context_keeps_tool_bundle_and_finish_is_not_fake_tool_call(tmp_
         success=True,
         run_id=first.run_id,
     )
-    session.record_message(
-        "assistant",
-        "[finish] inspected",
-        run_id=first.run_id,
-        tool_name="finish",
-        arguments={"summary": "inspected", "validation": "not needed"},
-    )
     session.complete_run(first, PreviousRunSnapshot(
         run_id=first.run_id, outcome="completed", summary="inspected"
     ))
@@ -165,13 +158,13 @@ def test_session_context_keeps_tool_bundle_and_finish_is_not_fake_tool_call(tmp_
     tool_messages = [message for message in messages if message.get("tool_call_id") == "call-1"]
     assert len(tool_messages) == 1
     assert any(message.get("tool_calls", [{}])[0].get("id") == "call-1" for message in messages)
-    assert any("[finish] inspected" in message.get("content", "") for message in messages)
+    assert any("inspected" in message.get("content", "") for message in messages)
     assert not any(
         message.get("role") == "tool" and message.get("tool_call_id") == "call-finish"
         for message in messages
     )
     assert sum("follow up" in message.get("content", "") for message in messages) == 1
-    assert len(session.messages) == 5
+    assert len(session.messages) == 4
 
 
 def test_model_failure_marks_session_failed_and_releases_guard(monkeypatch, tmp_path):
@@ -291,13 +284,6 @@ def test_second_run_can_reference_first_run_tool_and_finish(tmp_path):
         success=True,
         run_id=first.run_id,
     )
-    session.record_message(
-        "assistant",
-        "[finish] done inspecting",
-        run_id=first.run_id,
-        tool_name="finish",
-        arguments={"summary": "done inspecting", "validation": "not needed"},
-    )
     session.complete_run(first, PreviousRunSnapshot(
         run_id=first.run_id, outcome="completed", summary="done inspecting"
     ))
@@ -323,7 +309,7 @@ def test_second_run_can_reference_first_run_tool_and_finish(tmp_path):
     assert tool_calls and tool_results
 
     # Finish text fact is rendered; no fake tool_result for finish.
-    assert any("[finish] done inspecting" in (m.get("content") or "") for m in messages)
+    assert any("done inspecting" in (m.get("content") or "") for m in messages)
     assert not any(
         m.get("role") == "tool" and m.get("tool_call_id", "").startswith("tool-call-finish")
         for m in messages

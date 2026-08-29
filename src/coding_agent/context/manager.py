@@ -55,6 +55,15 @@ class _TurnBundle:
     tool: dict
 
 
+@dataclass
+class _Candidate:
+    """Budget candidate with stable source order and semantic priority."""
+
+    priority: str
+    order: int
+    payload: Any
+
+
 class ContextManager:
     """管理 Active Context 的构造与裁剪。
 
@@ -128,18 +137,24 @@ Workspace path boundary: do not escape the workspace directory."""
     ) -> list[dict[str, Any]]:
         """构造完整 Active Context messages，按 token 预算裁剪。"""
         # 1) 构造候选 messages（按优先级标记）
-        candidates: list[tuple[str, Any]] = []  # (priority, message)
+        candidates: list[_Candidate] = []  # priority + source order + payload
+        order = 0
+
+        def add(priority: str, payload: Any) -> None:
+            nonlocal order
+            candidates.append(_Candidate(priority, order, payload))
+            order += 1
 
         # P0: System Prompt
-        candidates.append(("P0", {"role": "system", "content": self.SYSTEM_PROMPT}))
+        add("P0", {"role": "system", "content": self.SYSTEM_PROMPT})
 
         # P0: Feedback（高优先级，永远保留；用于 InvalidAction / FinishPolicy 拒绝等）
         # 注意：每条 feedback 必须是完整自包含的，让模型在新一轮知道该改什么。
         for fb in self._feedback:
-            candidates.append(("P0", {"role": "user", "content": fb}))
+            add("P0", {"role": "user", "content": fb})
 
         # P0: Original Task
-        candidates.append(("P0", {"role": "user", "content": f"# Task\n{state.original_task}"}))
+        add("P0", {"role": "user", "content": f"# Task\n{state.original_task}"})
 
         # P1: Task Brief
         brief_text = brief.to_text()
@@ -148,21 +163,21 @@ Workspace path boundary: do not escape the workspace directory."""
         # it verbatim and accidentally turn one task into repeated instructions.
         if session is not None:
             brief_text = self._hide_current_task(brief_text, state.original_task)
-        candidates.append(("P1", {"role": "assistant", "content": brief_text}))
+        add("P1", {"role": "assistant", "content": brief_text})
 
         # P1: Working State（每次重渲染）
         working_text = self.working_state_builder.render(state)
         if session is not None:
             working_text = self._hide_current_task(working_text, state.original_task)
         if working_text != "(no state yet)":
-            candidates.append(("P1", {"role": "user", "content": working_text}))
+            add("P1", {"role": "user", "content": working_text})
 
         # P1: ready_to_finish hint (P1-3 修复)
         # 当最近一次 validation 通过且之后没有新 mutation 时,
         # 注入一条一次性提示,告诉模型"测试已经通过,可以直接 finish"。
         # 优先级 P1：不会被预算裁剪掉,模型下一轮决策时一定能看见。
         if state.ready_to_finish:
-            candidates.append(("P1", {
+            add("P1", {
                 "role": "user",
                 "content": (
                     "[System Hint] The most recent validation passed. "
@@ -171,7 +186,7 @@ Workspace path boundary: do not escape the workspace directory."""
                     "'pytest tests/ - 3 passed'). Do NOT run more read_file "
                     "or git_diff unless you have made new changes."
                 ),
-            }))
+            })
 
         # P2: Recent Interaction（按添加顺序，前面的较低优先级）
         # 关键修复 (P1-4)：tool turn = (assistant tool_call, tool_result) 是一对
@@ -189,8 +204,7 @@ Workspace path boundary: do not escape the workspace directory."""
             for idx, turn in enumerate(recent):
                 # 越近的越优先 P2，越远的降为 P3
                 priority = "P2" if idx >= len(recent) - 3 else "P3"
-                # 把一个 turn 包成 list[tuple[prio, msg]]，后面整体计算 token
-                candidates.append((priority, _TurnBundle(
+                add(priority, _TurnBundle(
                     assistant=(
                         {
                             "role": "assistant",
@@ -214,7 +228,7 @@ Workspace path boundary: do not escape the workspace directory."""
                             "content": turn.tool_result_content,
                         }
                     ),
-                )))
+                ))
 
         # 2) 按 token 预算淘汰
         messages = self._pack_by_budget(candidates)
@@ -232,7 +246,7 @@ Workspace path boundary: do not escape the workspace directory."""
         session: AgentSession,
         *,
         current_run_id: str | None,
-    ) -> list[tuple[str, Any]]:
+    ) -> list[_Candidate]:
         """Convert complete Session facts into bounded context candidates.
 
         Session history is never changed here. Assistant tool calls are only
@@ -241,8 +255,14 @@ Workspace path boundary: do not escape the workspace directory."""
         """
         messages = session.messages
         current_run_id = current_run_id or session.active_run_id
-        candidates: list[tuple[str, Any]] = []
+        candidates: list[_Candidate] = []
         consumed: set[int] = set()
+        order = 0
+
+        def add(priority: str, payload: Any) -> None:
+            nonlocal order
+            candidates.append(_Candidate(priority, order, payload))
+            order += 1
 
         for index, message in enumerate(messages):
             if index in consumed:
@@ -252,7 +272,7 @@ Workspace path boundary: do not escape the workspace directory."""
                 # ``# Task`` below; do not duplicate its Session fact.
                 continue
             if message.role == "user":
-                candidates.append(("P3", {"role": "user", "content": message.content}))
+                add("P3", {"role": "user", "content": message.content})
                 continue
             if message.role == "tool":
                 # Orphan results are not useful to the model and must not be
@@ -265,7 +285,7 @@ Workspace path boundary: do not escape the workspace directory."""
                 if message.tool_name == "finish":
                     arguments = _json_dumps(dict(message.arguments))
                     content = message.content or f"[finish] {arguments}"
-                    candidates.append(("P2", {"role": "assistant", "content": content}))
+                    add("P2", {"role": "assistant", "content": content})
                     continue
                 result_index = next(
                     (
@@ -281,7 +301,7 @@ Workspace path boundary: do not escape the workspace directory."""
                     continue
                 result = messages[result_index]
                 consumed.add(result_index)
-                candidates.append(("P2", _TurnBundle(
+                add("P2", _TurnBundle(
                     assistant={
                         "role": "assistant",
                         "content": message.content or "",
@@ -299,17 +319,17 @@ Workspace path boundary: do not escape the workspace directory."""
                         "tool_call_id": message.tool_call_id,
                         "content": result.tool_result or result.content,
                     },
-                )))
+                ))
                 continue
 
             if message.content:
-                candidates.append(("P3", {"role": "assistant", "content": message.content}))
+                add("P3", {"role": "assistant", "content": message.content})
 
         if session.snapshot is not None:
             snapshot = session.snapshot
             snapshot_text = self._snapshot_text(snapshot)
             if snapshot_text:
-                candidates.append(("P2", {"role": "user", "content": snapshot_text}))
+                add("P2", {"role": "user", "content": snapshot_text})
         return candidates
 
     def _snapshot_text(self, snapshot: PreviousRunSnapshot) -> str:
@@ -323,6 +343,8 @@ Workspace path boundary: do not escape the workspace directory."""
             ("reason", snapshot.reason),
             ("summary", snapshot.summary),
             ("validation", snapshot.validation),
+            ("validation_skipped_reason", snapshot.validation_skipped_reason),
+            ("notes", snapshot.notes),
             ("error", snapshot.error),
             ("status", snapshot.status),
         ):
@@ -336,87 +358,47 @@ Workspace path boundary: do not escape the workspace directory."""
         return "\n".join(lines)
 
     def _pack_by_budget(
-        self, candidates: list[tuple[str, Any]]
+        self, candidates: list[_Candidate]
     ) -> list[dict[str, Any]]:
-        """按优先级打包，**硬保证**总 token 数不超过 budget。
-
-        设计要点：
-        - 优先级 P0 > P1 > P2 > P3，按出现顺序累加
-        - 每一条消息都精确计数；超过 budget 的非 P0 消息**跳过**
-        - P0 消息（system / task / feedback）**永不丢弃**——单条超过 budget
-          时打 warning 并截断内容，但仍保留
-        - 这是 hard cap：返回的消息总 token 数 <= context_budget（除 P0 截断 case）
-
-        Turn bundle 处理 (P1-4 修复)：
-        - `_TurnBundle` 是一个 (assistant, tool) 对，打包成 list 提交预算
-        - bundle 总 token = assistant_token + tool_token + 4 (overhead)
-        - 任一条单独算都超 budget 时，bundle 一起丢，不留 orphan assistant
-
-        与旧版区别：
-        - 旧版 "80% 阈值" 魔法数被删除
-        - 旧版 P2 用 break 会跳过 P3，现在按顺序公平累加
-        - 旧版 P0/P1 全装（可能爆 budget），现在 P1 受 budget 限制
-        """
+        """Select fitting candidates by priority, then restore source order."""
         budget = self.config.context_budget
         total = 0
-        selected: list[dict] = []
+        selected: list[_Candidate] = []
+        priority_rank = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
-        for prio, payload in candidates:
-            # Turn bundle: 整对一起算 token，一起进 / 一起丢
+        for candidate in sorted(
+            candidates, key=lambda item: (priority_rank.get(item.priority, 99), item.order)
+        ):
+            payload = candidate.payload
             if isinstance(payload, _TurnBundle):
                 bundle_msgs = [payload.assistant, payload.tool]
-                bundle_tok = sum(self._count_message_tokens(m) for m in bundle_msgs)
-                if total + bundle_tok > budget:
-                    _log.debug(
-                        f"ContextManager: dropping turn bundle "
-                        f"({bundle_tok} tokens would exceed {total}/{budget})"
-                    )
+                token_count = sum(self._count_message_tokens(msg) for msg in bundle_msgs)
+                if total + token_count > budget:
                     continue
-                total += bundle_tok
-                selected.extend(bundle_msgs)
-                continue
-
-            # 普通单条 message
-            msg = payload
-            tok = self._count_message_tokens(msg)
-            if total + tok > budget:
-                if prio == "P0":
-                    # P0 不能丢：截断到剩余 budget 后保留
+            else:
+                token_count = self._count_message_tokens(payload)
+                if total + token_count > budget:
+                    if candidate.priority != "P0":
+                        continue
                     remaining = max(1, budget - total)
-                    _log.warning(
-                        f"ContextManager: P0 message alone ({tok} tokens) "
-                        f"exceeds remaining budget ({total}/{budget}). "
-                        f"Truncating to {remaining} tokens."
-                    )
-                    msg = self._truncate_message_to_budget(msg, remaining)
-                    tok = self._count_message_tokens(msg)
-                    if tok > remaining:
-                        # 即使截断也超（极少见：仅 message overhead 太多）—— still 放入
-                        _log.warning(
-                            f"ContextManager: truncated P0 still {tok} > "
-                            f"remaining {remaining}; will overflow budget"
-                        )
-                else:
-                    _log.debug(
-                        f"ContextManager: skipping {prio} message "
-                        f"({tok} tokens would exceed {total}/{budget})"
-                    )
-                    continue
-            total += tok
-            selected.append(msg)
+                    payload = self._truncate_message_to_budget(payload, remaining)
+                    token_count = self._count_message_tokens(payload)
+                    if token_count > remaining:
+                        _log.warning("ContextManager: truncated P0 exceeds budget")
+            total += token_count
+            selected.append(_Candidate(candidate.priority, candidate.order, payload))
 
-        # 强约束：除 P0 截断外，总 token 必须 <= budget
-        if total > budget:
-            _log.warning(
-                f"ContextManager: final total {total} > budget {budget} "
-                f"(due to P0 retention; this is acceptable)"
-            )
-
+        result: list[dict[str, Any]] = []
+        for candidate in sorted(selected, key=lambda item: item.order):
+            if isinstance(candidate.payload, _TurnBundle):
+                result.extend([candidate.payload.assistant, candidate.payload.tool])
+            else:
+                result.append(candidate.payload)
         _log.info(
-            f"ContextManager: packed {len(selected)}/{len(candidates)} messages, "
-            f"{total}/{budget} tokens"
+            "ContextManager: packed %s/%s messages, %s/%s tokens",
+            len(result), len(candidates), total, budget,
         )
-        return selected
+        return result
 
     def _truncate_message_to_budget(self, msg: dict, budget: int) -> dict:
         """截断单条 message 的 content 使其 token 数 <= budget。

@@ -15,7 +15,45 @@ from coding_agent.session import (
 )
 
 
-def test_message_is_deeply_immutable() -> None:
+def test_tool_calls_and_results_are_strictly_paired(tmp_path: Path) -> None:
+    session = AgentSession(tmp_path)
+    run = session.begin_run("tools")
+    session.record_tool_call(
+        tool_call_id="call-1", tool_name="read_file", arguments={"path": "a"}, run_id=run.run_id
+    )
+    with pytest.raises(SessionStateError):
+        session.record_tool_result(
+            tool_call_id="orphan", tool_name="read_file", content="x", success=True, run_id=run.run_id
+        )
+    with pytest.raises(SessionStateError):
+        session.record_tool_call(
+            tool_call_id="call-1", tool_name="read_file", arguments={}, run_id=run.run_id
+        )
+    with pytest.raises(SessionStateError):
+        session.record_tool_result(
+            tool_call_id="call-1", tool_name="wrong", content="x", success=True, run_id=run.run_id
+        )
+    session.record_tool_result(
+        tool_call_id="call-1", tool_name="read_file", content="x", success=True, run_id=run.run_id
+    )
+    with pytest.raises(SessionStateError):
+        session.record_tool_result(
+            tool_call_id="call-1", tool_name="read_file", content="x", success=True, run_id=run.run_id
+        )
+    assert len(session.messages) == 2
+
+
+def test_complete_rejects_unresolved_tool_call(tmp_path: Path) -> None:
+    session = AgentSession(tmp_path)
+    run = session.begin_run("tools")
+    session.record_tool_call(
+        tool_call_id="call-1", tool_name="read_file", arguments={}, run_id=run.run_id
+    )
+    with pytest.raises(SessionStateError, match="unresolved"):
+        session.complete_run(run)
+    assert session.active_run is None
+
+
     arguments = {"nested": {"items": ["before"]}}
     message = SessionMessage(role="assistant", arguments=arguments)
 
@@ -63,7 +101,7 @@ def test_records_require_current_active_run(tmp_path: Path) -> None:
     with pytest.raises(SessionStateError):
         session.record_user("without run")
 
-    run = session.begin_run("task")
+    session.begin_run("task")
     with pytest.raises(SessionStateError):
         session.record_user("wrong", run_id="run_other")
 

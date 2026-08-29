@@ -116,9 +116,64 @@ class AgentSession:
         if not isinstance(message, SessionMessage):
             raise TypeError("session history accepts SessionMessage values only")
         with self._lock:
-            self._ensure_message_capacity()
-            self._messages.append(message)
+            self._append_message_locked(message)
         return message
+
+    def _append_message_locked(self, message: SessionMessage) -> None:
+        """Validate and append a fact while the session lock is held."""
+        self._validate_message(message)
+        self._ensure_message_capacity()
+        self._messages.append(message)
+
+    def _validate_message(self, message: SessionMessage) -> None:
+        self._require_active_run(message.run_id)
+        if message.role == "assistant" and message.tool_call_id:
+            if not message.tool_name:
+                raise SessionStateError("tool call requires tool_call_id and tool_name")
+            if any(
+                prior.role == "assistant"
+                and prior.run_id == message.run_id
+                and prior.tool_call_id == message.tool_call_id
+                for prior in self._messages
+            ):
+                raise SessionStateError(
+                    f"tool call {message.tool_call_id} was already recorded"
+                )
+            return
+
+        if message.role == "tool":
+            if not message.tool_call_id or not message.tool_name:
+                raise SessionStateError("tool result requires tool_call_id and tool_name")
+            matching_call = next(
+                (
+                    prior
+                    for prior in self._messages
+                    if prior.role == "assistant"
+                    and prior.run_id == message.run_id
+                    and prior.tool_call_id == message.tool_call_id
+                ),
+                None,
+            )
+            if matching_call is None:
+                raise SessionStateError(
+                    f"tool result {message.tool_call_id} has no matching tool call"
+                )
+            if matching_call.tool_name != message.tool_name:
+                raise SessionStateError(
+                    f"tool result {message.tool_call_id} names {message.tool_name!r}, "
+                    f"expected {matching_call.tool_name!r}"
+                )
+            if any(
+                prior.role == "tool"
+                and prior.run_id == message.run_id
+                and prior.tool_call_id == message.tool_call_id
+                for prior in self._messages
+            ):
+                raise SessionStateError(
+                    f"tool result {message.tool_call_id} was already recorded"
+                )
+        elif message.tool_call_id or message.tool_name or message.tool_result:
+            raise SessionStateError("tool metadata is only valid for tool facts")
 
     def record_message(
         self,
@@ -133,22 +188,22 @@ class AgentSession:
         success: bool | None = None,
         error: str = "",
     ) -> SessionMessage:
-        """Construct and append one message fact."""
-        actual_run_id = run_id or self._required_active_run_id()
+        """Construct and append one message fact atomically."""
         with self._lock:
-            self._require_active_run(actual_run_id)
-        message = SessionMessage(
-            role=role,
-            content=content,
-            run_id=actual_run_id,
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
-            arguments=arguments or {},
-            tool_result=tool_result,
-            success=success,
-            error=error,
-        )
-        return self.record(message)
+            actual_run_id = run_id or self._required_active_run_id()
+            message = SessionMessage(
+                role=role,
+                content=content,
+                run_id=actual_run_id,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                arguments=arguments or {},
+                tool_result=tool_result,
+                success=success,
+                error=error,
+            )
+            self._append_message_locked(message)
+            return message
 
     def record_user(self, content: str, *, run_id: str | None = None) -> SessionMessage:
         return self.record_message("user", content, run_id=run_id)
@@ -174,6 +229,8 @@ class AgentSession:
         content: str = "",
         run_id: str | None = None,
     ) -> SessionMessage:
+        if not tool_call_id or not tool_name:
+            raise SessionStateError("tool call requires tool_call_id and tool_name")
         return self.record_message(
             "assistant",
             content,
@@ -258,6 +315,24 @@ class AgentSession:
             try:
                 if snapshot is not None and not isinstance(snapshot, PreviousRunSnapshot):
                     raise TypeError("snapshot must be a PreviousRunSnapshot")
+                if outcome == "completed":
+                    unresolved = {
+                        message.tool_call_id
+                        for message in self._messages
+                        if message.role == "assistant"
+                        and message.tool_call_id
+                        and not any(
+                            result.role == "tool"
+                            and result.run_id == message.run_id
+                            and result.tool_call_id == message.tool_call_id
+                            for result in self._messages
+                        )
+                    }
+                    if unresolved:
+                        raise SessionStateError(
+                            "cannot complete run with unresolved tool calls: "
+                            + ", ".join(sorted(unresolved))
+                        )
                 committed = snapshot or PreviousRunSnapshot.from_facts(
                     actual_id,
                     facts,

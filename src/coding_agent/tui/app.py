@@ -197,8 +197,11 @@ class CodingAgentApp(App):
                 return
             self._workspace = new_path
             self._session = AgentSession(workspace=self._workspace)
-            self.query_one(BrandBarWidget).set_workspace(new_path)
+            await self._reset_transcript()
+            self._ui_state = initial_ui_state()
+            self._status().apply_state(self._ui_state)
             self._footer().set_workspace(new_path)
+            self.query_one(BrandBarWidget).set_workspace(new_path)
             if self._welcome is not None:
                 self._welcome.set_workspace(new_path)
             await self._append(NoticeWidget(f"workspace 已切换到 {new_path}", level="system"))

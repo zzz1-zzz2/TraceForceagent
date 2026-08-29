@@ -148,6 +148,7 @@ class RunStateSnapshot:
     summary: str = ""
     validation: str = ""
     validation_skipped_reason: str = ""
+    notes: str = ""
     reply: str = ""
     steps: int = 0
     total_tokens: int = 0

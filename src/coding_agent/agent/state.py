@@ -14,7 +14,7 @@ from enum import Enum
 from pathlib import Path
 
 
-class StopReason(str, Enum):
+class StopReason(str, Enum):  # noqa: UP042 - preserve the public enum type
     """循环终止原因。"""
 
     FINISH = "finish"  # 模型显式 finish
@@ -72,6 +72,7 @@ class AgentState:
     finish_summary: str | None = None
     finish_validation: str | None = None
     finish_validation_skipped_reason: str | None = None
+    finish_notes: str | None = None
     reply_text: str | None = None
 
     # --- Mutation / Validation tracking (P0-2 / P0-3) ---
@@ -275,12 +276,14 @@ class AgentState:
         summary: str,
         validation: str = "",
         validation_skipped_reason: str = "",
+        notes: str = "",
     ) -> None:
         """标记为完成（finish tool 调用时）。"""
         self.status = "COMPLETED"
         self.finish_summary = summary
         self.finish_validation = validation
         self.finish_validation_skipped_reason = validation_skipped_reason or None
+        self.finish_notes = notes or None
         self.stop_reason = StopReason.FINISH
 
     def mark_stopped(self, reason: StopReason) -> None:

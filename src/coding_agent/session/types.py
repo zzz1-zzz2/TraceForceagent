@@ -140,6 +140,8 @@ class PreviousRunSnapshot:
     reason: str = ""
     summary: str = ""
     validation: str = ""
+    notes: str = ""
+    validation_skipped_reason: str = ""
     error: str = ""
     modified_files: tuple[str, ...] = ()
     findings: tuple[str, ...] = ()
@@ -149,7 +151,10 @@ class PreviousRunSnapshot:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", _bounded_text(self.run_id, field="run_id", limit=256))
-        for name in ("outcome", "reason", "summary", "validation", "error", "status"):
+        for name in (
+            "outcome", "reason", "summary", "validation", "notes",
+            "validation_skipped_reason", "error", "status",
+        ):
             object.__setattr__(self, name, _clip_snapshot_text(getattr(self, name), field=name))
         object.__setattr__(
             self,
@@ -183,6 +188,11 @@ class PreviousRunSnapshot:
             reason=reason or getattr(facts, "stop_reason", "") or getattr(final_state, "reason", ""),
             summary=getattr(source, "summary", "") if source is not None else "",
             validation=getattr(source, "validation", "") if source is not None else "",
+            notes=getattr(source, "notes", "") if source is not None else "",
+            validation_skipped_reason=(
+                getattr(source, "validation_skipped_reason", "")
+                if source is not None else ""
+            ),
             error=error,
             modified_files=tuple(getattr(source, "modified_files", ()) or ()) if source is not None else (),
             findings=tuple(getattr(source, "findings", ()) or ()) if source is not None else (),
