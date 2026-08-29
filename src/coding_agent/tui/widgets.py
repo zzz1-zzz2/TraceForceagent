@@ -2,42 +2,35 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
-from dataclasses import replace
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import Click, Key
 from textual.widget import Widget
 from textual.widgets import Input, Markdown, Static
 
 from coding_agent import __version__
-from coding_agent.tui.state import RunUiState, ToolUiState, ToolUiStatus
-
-_PREVIEW_LINES: Final = 12
-_PREVIEW_CHARS: Final = 2400
-_ANSI_ESCAPE: Final = re.compile(
-    r"(?:\x1B\][^\x07]*(?:\x07|\x1B\\)|\x1B\[[0-?]*[ -/]*[@-~])"
-)
+from coding_agent.tui.formatting import clean_text, preview
+from coding_agent.tui.presenters import present_tool
+from coding_agent.tui.state import RunUiState, ToolUiState
 
 
-def _clean_text(value: object, *, limit: int = _PREVIEW_CHARS) -> str:
-    """Make untrusted tool output safe and bounded for terminal rendering."""
-    text = _ANSI_ESCAPE.sub("", str(value or ""))
-    text = "".join(char if char.isprintable() or char in "\n\t" else "�" for char in text)
+# These compatibility helpers remain importable for existing callers while the
+# tool-specific presentation contract lives in ``presenters.py``.
+def _clean_text(value: object, *, limit: int = 2_400) -> str:
+    """Make untrusted text safe and bounded for terminal rendering."""
+    text = clean_text(value, limit=None)
     if len(text) > limit:
         return text[:limit].rstrip() + "…"
     return text
 
 
-def _preview(value: object, *, lines: int = _PREVIEW_LINES) -> str:
-    text = _clean_text(value)
-    chunks = text.splitlines()
-    if len(chunks) > lines:
-        return "\n".join(chunks[-lines:]) + f"\n… ({len(chunks) - lines} earlier lines)"
-    return text
+def _preview(value: object, *, lines: int = 12) -> str:
+    """Return the historical bounded tail preview."""
+    return preview(value, lines=lines)
 
 
 def _path(arguments: Mapping[str, object]) -> str:
@@ -45,25 +38,8 @@ def _path(arguments: Mapping[str, object]) -> str:
 
 
 def tool_title(state: ToolUiState) -> str:
-    """Return a compact, tool-specific title without dumping raw JSON."""
-    arguments = state.arguments
-    if state.tool_name == "run_command":
-        command = " ".join(str(arguments.get("command", "")).split())
-        return "$ " + _clean_text(command, limit=160)
-    if state.tool_name == "read_file":
-        return f"Read {_clean_text(_path(arguments), limit=160)}"
-    if state.tool_name == "list_files":
-        return f"List {_clean_text(_path(arguments), limit=160)}"
-    if state.tool_name == "search_code":
-        query = _clean_text(arguments.get("query", ""), limit=80)
-        return f'Search "{query}" in {_clean_text(_path(arguments), limit=120)}'
-    if state.tool_name in {"apply_patch", "patch"}:
-        return f"Modify {_clean_text(_path(arguments), limit=160)}"
-    if state.tool_name == "git_diff":
-        return "Inspect changes"
-    if state.tool_name == "update_plan":
-        return "Update plan"
-    return _clean_text(state.tool_name or "Tool", limit=160)
+    """Return the presenter-generated compact tool title."""
+    return present_tool(state).title
 
 
 class BrandBarWidget(Static):
@@ -157,13 +133,16 @@ class AssistantMessageWidget(Vertical):
 class ToolExecutionWidget(Vertical):
     """One stable tool card updated by ``run_id + action_id``."""
 
+    can_focus = True
+
     def __init__(self, state: ToolUiState, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.state = state
+        self.expanded = False
+        self._header = Static(markup=False)
+        self._summary = Static(markup=False)
+        self._preview = Static(markup=False)
         self.add_class("tool-execution")
-        self._header = Static()
-        self._summary = Static()
-        self._preview = Static()
 
     def compose(self) -> ComposeResult:
         yield self._header
@@ -174,13 +153,30 @@ class ToolExecutionWidget(Vertical):
         self.render_tool()
 
     def apply_state(self, state: ToolUiState) -> None:
+        """Apply lifecycle state without changing local interaction state."""
         self.state = state
         if self.is_mounted:
             self.render_tool()
 
     def set_expanded(self, expanded: bool) -> None:
-        self.state = replace(self.state, expanded=expanded)
+        self.expanded = expanded
         self.render_tool()
+
+    def toggle_expanded(self) -> None:
+        self.set_expanded(not self.expanded)
+
+    async def _on_click(self, event: Click) -> None:
+        if event.button == 1 and event.widget is self:
+            self.toggle_expanded()
+            event.stop()
+        await super()._on_click(event)
+
+    async def _on_key(self, event: Key) -> None:
+        if event.key in {"enter", "space"}:
+            self.toggle_expanded()
+            event.stop()
+            return
+        await super()._on_key(event)
 
     def render_tool(self) -> None:
         status = self.state.status.value
@@ -188,19 +184,12 @@ class ToolExecutionWidget(Vertical):
         self.set_class(status == "running", "running")
         for name in ("success", "error", "cancelled"):
             self.set_class(status == name, name)
-        self._header.update(f"{icon} {tool_title(self.state)}")
-        if self.state.status is ToolUiStatus.RUNNING:
-            summary = "running"
-        elif self.state.is_runtime_error:
-            summary = self.state.error or "runtime error"
-        elif self.state.is_validation_failure:
-            summary = self.state.summary or "validation failed"
-        else:
-            summary = self.state.summary or ("completed" if self.state.success else "failed")
-        self._summary.update(_clean_text(summary, limit=320))
-        content = self.state.error if self.state.status is ToolUiStatus.ERROR and self.state.error else self.state.content
-        shown = content if self.state.expanded else _preview(content)
-        self._preview.update(_clean_text(shown) or "(no output)")
+        presentation = present_tool(self.state)
+        self.set_class(self.expanded, "expanded")
+        self._header.update(f"{icon} {presentation.title}")
+        self._summary.update(presentation.summary)
+        shown = presentation.expanded_text if self.expanded else presentation.collapsed_text
+        self._preview.update(shown)
 
 
 class ValidationWidget(Static):
@@ -239,7 +228,7 @@ class FinalResultWidget(Vertical):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._content = Static()
+        self._content = Static(markup=False)
 
     def compose(self) -> ComposeResult:
         yield self._content
@@ -334,5 +323,7 @@ __all__ = [
     "UserMessageWidget",
     "ValidationWidget",
     "WelcomeWidget",
+    "_clean_text",
+    "_preview",
     "tool_title",
 ]

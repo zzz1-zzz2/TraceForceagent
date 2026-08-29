@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import cast
 
+from coding_agent.tui.presenters import present_tool
 from coding_agent.tui.state import RunUiState, ToolUiState, ToolUiStatus
 from coding_agent.tui.widgets import (
     AssistantMessageWidget,
@@ -113,6 +114,69 @@ def test_final_result_shows_modified_files_without_notes() -> None:
     widget.apply_state(state)
     content = cast(str, widget._content._Static__content)  # type: ignore[attr-defined]
     assert content == "✓ completed\ndone\nmodified: a.py · b.py\n0 steps · 0 tokens"
+
+
+def test_tool_presenters_cover_built_in_tools() -> None:
+    cases = [
+        (_tool(tool_name="read_file", arguments={"path": "app.py", "start_line": 2, "end_line": 8}, content="# app.py (lines 2-8 of 20)\n\n   2\tmain"), "Read app.py:2–8", "file"),
+        (_tool(tool_name="list_files", arguments={"path": "src"}, content="one.py\ntwo.py"), "List src", "listing"),
+        (_tool(tool_name="search_code", arguments={"query": "needle", "path": "src"}, content="Found 1 matches for 'needle':\nsrc/app.py:1:needle"), 'Search "needle" in src', "search"),
+        (_tool(tool_name="apply_patch", arguments={"path": "new.py", "mode": "create"}, content="Created new.py\n(12 bytes)"), "Create new.py", "diff"),
+        (_tool(tool_name="apply_patch", arguments={"path": "old.py", "mode": "delete"}, content="Deleted old.py"), "Delete old.py", "diff"),
+        (_tool(tool_name="git_diff", content="--- a/app.py\n+++ b/app.py\n@@\n-old\n+new"), "Inspect changes", "diff"),
+        (_tool(tool_name="update_plan", arguments={"items": [{"status": "completed", "content": "done"}, {"status": "in_progress", "content": "now"}, {"status": "pending", "content": "later"}]}, content="Plan updated:"), "Update plan", "checklist"),
+        (_tool(tool_name="custom_tool", content="raw result"), "custom_tool", "text"),
+    ]
+    for state, title, kind in cases:
+        presentation = present_tool(state)
+        assert presentation.title == title
+        assert presentation.preview_kind == kind
+        assert presentation.collapsed_text
+        assert presentation.expanded_text
+
+
+def test_tool_presenters_bound_both_collapsed_and_expanded_output() -> None:
+    content = "\n".join(f"line-{index}" for index in range(500))
+    presentation = present_tool(_tool(content=content))
+    assert len(presentation.collapsed_text) <= 2_400
+    assert len(presentation.expanded_text) <= 32_000
+    assert len(presentation.collapsed_text.splitlines()) <= 12
+    assert len(presentation.expanded_text.splitlines()) <= 200
+
+
+def test_run_command_presenter_uses_tail_and_removes_echo() -> None:
+    state = _tool(content="$ pytest -q\n" + "\n".join(f"line-{i}" for i in range(20)))
+    presentation = present_tool(state)
+    assert "$ pytest -q" not in presentation.collapsed_text
+    assert "line-19" in presentation.collapsed_text
+    assert "line-0" not in presentation.collapsed_text
+
+
+def test_patch_and_diff_presenters_do_not_expose_raw_patch_arguments() -> None:
+    state = _tool(
+        tool_name="apply_patch",
+        arguments={
+            "path": "app.py",
+            "mode": "modify",
+            "old_string": "PRIVATE_OLD_CONTENT",
+            "new_string": "PRIVATE_NEW_CONTENT",
+        },
+        content="@@\n-old\n+new",
+        status=ToolUiStatus.SUCCESS,
+        success=True,
+    )
+    presentation = present_tool(state)
+    assert "+1 -1" in presentation.summary
+    assert "PRIVATE_OLD_CONTENT" not in presentation.expanded_text
+    assert "PRIVATE_NEW_CONTENT" not in presentation.expanded_text
+
+
+def test_tool_widget_expansion_is_local_and_survives_state_updates() -> None:
+    widget = ToolExecutionWidget(_tool(content="first\nsecond"))
+    widget.set_expanded(True)
+    widget.apply_state(_tool(status=ToolUiStatus.SUCCESS, success=True, content="updated"))
+    assert widget.expanded is True
+    assert not hasattr(widget.state, "expanded")
 
 
 def test_brand_widget_accepts_workspace_path() -> None:

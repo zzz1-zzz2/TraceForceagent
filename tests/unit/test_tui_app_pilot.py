@@ -193,3 +193,79 @@ async def test_run_failed_does_not_render_completed_state(tmp_path: Path) -> Non
         assert "finished" not in final.classes
         assert "error" in final.classes
         await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_tool_keyboard_mouse_and_global_toggle_preserve_local_state(tmp_path: Path) -> None:
+    app = CodingAgentApp(workspace=tmp_path)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _post(app, pilot, RunStarted(run_id="run-1", sequence=1))
+        await _post(
+            app,
+            pilot,
+            ToolStarted(
+                run_id="run-1",
+                sequence=2,
+                turn=1,
+                step=1,
+                tool_name="run_command",
+                action_id="a1",
+                arguments={"command": "printf output"},
+            ),
+        )
+        tool = app.query_one(ToolExecutionWidget)
+        tool.focus()
+        await pilot.press("enter")
+        assert tool.expanded
+        await pilot.press("space")
+        assert not tool.expanded
+        await pilot.click(tool, offset=(1, 0))
+        assert tool.expanded
+        tool.focus()
+        await pilot.press("ctrl+o")
+        assert not tool.expanded
+        await pilot.press("ctrl+o")
+        assert tool.expanded
+        app.query_one(Input).focus()
+        await pilot.press("a", "space")
+        assert app.query_one(Input).value == "a "
+        await pilot.press("escape")
+        assert app.focused is app.query_one(Input)
+
+
+@pytest.mark.asyncio
+async def test_expanded_tool_stays_expanded_when_terminal_event_arrives(tmp_path: Path) -> None:
+    app = CodingAgentApp(workspace=tmp_path)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _post(app, pilot, RunStarted(run_id="run-1", sequence=1))
+        await _post(
+            app,
+            pilot,
+            ToolStarted(
+                run_id="run-1",
+                sequence=2,
+                turn=1,
+                step=1,
+                tool_name="run_command",
+                action_id="a1",
+                arguments={"command": "printf output"},
+            ),
+        )
+        tool = app.query_one(ToolExecutionWidget)
+        tool.set_expanded(True)
+        await _post(
+            app,
+            pilot,
+            ToolCompleted(
+                run_id="run-1",
+                sequence=3,
+                turn=1,
+                step=1,
+                tool_name="run_command",
+                action_id="a1",
+                result=ToolResultSnapshot(success=True, content="done"),
+            ),
+        )
+        assert app.query_one(ToolExecutionWidget) is tool
+        assert tool.expanded
+        assert tool.state.status is ToolUiStatus.SUCCESS
