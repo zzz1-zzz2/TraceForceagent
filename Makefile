@@ -1,64 +1,64 @@
-# Coding Agent Makefile
-# 使用方式: make <target>
+# TraceForce Makefile
+# These targets are the single source of truth for entry points.
+# They MUST stay in sync with the Typer commands in src/coding_agent/cli.py.
+# Real CLI surface today: run | tui | check | config show | config path
+# Helpers (no auth needed): make help, make test, make lint
 
 PYTHON ?= python3
 VENV ?= .venv
 BIN := $(VENV)/bin
 
-.PHONY: help setup dev test eval eval-all-l1 tui clean lint format check-secrets install-deps
+.PHONY: help setup dev install-deps run tui check config-show config-path test test-cov lint format check-secrets clean
 
-help: ## 显示帮助
+help: ## Show this help.
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-# === 环境 ===
-setup: ## 初始化开发环境（创建 venv，安装依赖）
+# === Environment ===
+setup: ## Bootstrap a development venv with dev extras.
 	bash scripts/setup_dev.sh
 
-install-deps: ## 安装依赖
+install-deps: ## Recreate venv and install the package + dev extras.
 	uv venv $(VENV)
 	uv pip install -e ".[dev]"
 
-# === 运行 ===
-dev: ## 开发模式运行（CLI help）
-	$(BIN)/python -m coding_agent --help
+# === Pre-flight ===
+check: ## Run provider/workspace/runtime preflight (no model call).
+	$(BIN)/coding-agent check
 
-tui: ## 启动 Textual TUI
-	$(BIN)/python -m coding_agent --tui
+config-show: ## Show resolved, redacted configuration.
+	$(BIN)/coding-agent config show
 
-# === 测试 ===
-test: ## 跑单元测试
+config-path: ## Print the user-level TOML config path.
+	$(BIN)/coding-agent config path
+
+# === Run ===
+run: ## Non-interactive single shot. Args: TASK="…" WORKSPACE=path
+	$(BIN)/coding-agent run --task "$(TASK)" --workspace "$(WORKSPACE)"
+
+tui: ## Launch the Textual TUI. Args: WORKSPACE=path [ENV_FILE=path]
+	@if [ -n "$(ENV_FILE)" ]; then \
+		$(BIN)/coding-agent --env-file "$(ENV_FILE)" tui --workspace "$(WORKSPACE)"; \
+	else \
+		$(BIN)/coding-agent tui --workspace "$(WORKSPACE)"; \
+	fi
+
+# === Tests / Lint ===
+test: ## Run the unit + integration test suite (credential-free).
 	$(BIN)/pytest tests/ -v
 
-test-cov: ## 跑测试并生成覆盖率
+test-cov: ## Run tests with coverage report.
 	$(BIN)/pytest tests/ --cov=coding_agent --cov-report=html --cov-report=term
 
-# === 评测 ===
-eval: ## 跑单个 L1 任务（如 make eval TASK=A_safe_divide）
-	$(BIN)/python -m eval.run_task --task eval/tasks/$(TASK) --model deepseek-chat
-
-eval-all-l1: ## 跑全部 5 个 L1 任务
-	@for task in A_safe_divide B_cache_clear C_config_friendly D_chunked_robust E_todo_cli; do \
-		echo "=================================================="; \
-		echo "Running $$task..."; \
-		$(BIN)/python -m eval.run_task --task eval/tasks/$$task --model deepseek-chat --quiet || true; \
-	done
-
-eval-real: ## 跑真实 Issue（如 make eval-real TASK=django_make_toast）
-	$(BIN)/python -m eval.run_task --task eval/real/$(TASK) --model deepseek-chat
-
-# === 工具 ===
-lint: ## Ruff lint
+lint: ## Ruff lint on src/ and tests/.
 	$(BIN)/ruff check src/ tests/
 
-format: ## Ruff format
+format: ## Ruff format src/ and tests/.
 	$(BIN)/ruff format src/ tests/
 
-check-secrets: ## 检查仓库里有没有 API key
+check-secrets: ## Scan the repo for accidentally committed credentials.
 	bash scripts/check_secrets.sh
 
-# === 清理 ===
-clean: ## 清理临时文件
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name .ruff_cache -exec rm -rf {} + 2>/dev/null || true
-	rm -rf runs/* logs/ htmlcov/ .coverage 2>/dev/null || true
+# === Cleanup ===
+clean: ## Remove local caches and build artefacts.
+	rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage
+	find . -type d -name __pycache__ -prune -exec rm -rf {} +

@@ -26,15 +26,9 @@ ENV/
 .env.*.local
 
 # 运行产物
-runs/*
-!runs/.gitkeep
-!runs/.gitignore
+# trajectory 已迁到 ~/.traceforce/runs/，仓库根目录不再保留 runs/
 workspace/
 !workspace/.gitkeep
-
-# 评测结果
-eval/results/*
-!eval/results/.gitkeep
 
 # 编辑器
 .vscode/
@@ -43,17 +37,11 @@ eval/results/*
 *.swo
 .DS_Store
 
-# 视频和提交物（不进仓库）
-video/raw/
-video/final/
-*.mp4
-*.zip
-
 # 临时文件
 *.tmp
 *.bak
 *.log
 logs/
 
-# 注：*.docx 已保留（按你的决定）
-# *.docx  # 设计文档原始 Word 版本，现纳入仓库
+# Note: *.docx 归档保留在 docs/archive/pre-p1/ 作为历史快照，
+# 仓库根目录不再混入个人材料或与产品无关的 PDF。

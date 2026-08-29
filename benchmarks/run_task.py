@@ -1,7 +1,7 @@
 """评测脚本入口。
 
 用法：
-  python -m eval.run_task --task eval/tasks/A_safe_divide --model deepseek-chat
+  python -m benchmarks.run_task --task benchmarks/tasks/A_safe_divide --model deepseek-chat
 """
 
 from __future__ import annotations
