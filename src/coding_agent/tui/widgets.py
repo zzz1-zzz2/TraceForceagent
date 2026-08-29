@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -17,11 +18,14 @@ from coding_agent.tui.state import RunUiState, ToolUiState, ToolUiStatus
 
 _PREVIEW_LINES: Final = 12
 _PREVIEW_CHARS: Final = 2400
+_ANSI_ESCAPE: Final = re.compile(
+    r"(?:\x1B\][^\x07]*(?:\x07|\x1B\\)|\x1B\[[0-?]*[ -/]*[@-~])"
+)
 
 
 def _clean_text(value: object, *, limit: int = _PREVIEW_CHARS) -> str:
     """Make untrusted tool output safe and bounded for terminal rendering."""
-    text = str(value or "").replace("\x1b", "")
+    text = _ANSI_ESCAPE.sub("", str(value or ""))
     text = "".join(char if char.isprintable() or char in "\n\t" else "�" for char in text)
     if len(text) > limit:
         return text[:limit].rstrip() + "…"
@@ -136,6 +140,7 @@ class AssistantMessageWidget(Vertical):
         super().__init__(**kwargs)
         self.content = content
         self.markdown = Markdown(content)
+        self.add_class("assistant-message")
 
     def compose(self) -> ComposeResult:
         yield self.markdown
@@ -254,10 +259,13 @@ class FinalResultWidget(Vertical):
             lines.append(f"validation skipped: {state.validation_skipped_reason}")
         if state.final_notes:
             lines.append(f"notes: {state.final_notes}")
+        if state.modified_files:
             lines.append("modified: " + " · ".join(state.modified_files))
         lines.append(f"{state.step} steps · {state.total_tokens:,} tokens")
         if state.terminal_reason:
             lines.append(f"reason: {state.terminal_reason}")
+        if state.terminal_error and state.terminal_error != state.terminal_reason:
+            lines.append(f"error: {state.terminal_error}")
         self._content.update(_clean_text("\n".join(lines), limit=1800))
 
 

@@ -133,7 +133,7 @@ def tui(
         None,
         "--workspace",
         "-w",
-        help="Agent 工作目录（默认 ./workspace）",
+        help="Agent 工作目录（默认当前目录）",
     ),
 ) -> None:
     """启动 Textual TUI。"""

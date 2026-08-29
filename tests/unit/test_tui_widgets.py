@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 from coding_agent.tui.state import RunUiState, ToolUiState, ToolUiStatus
 from coding_agent.tui.widgets import (
@@ -29,10 +30,12 @@ def _tool(**overrides: object) -> ToolUiState:
 
 
 def test_clean_text_removes_escape_sequences_and_control_characters() -> None:
-    cleaned = _clean_text("hello\x1b[31m\x07world")
+    cleaned = _clean_text("hello\x1b[31mred\x1b[0m\x1b]0;title\x07\x07world")
     assert "\x1b" not in cleaned
-    assert "\x07" not in cleaned
+    assert "[31m" not in cleaned
+    assert "[0m" not in cleaned
     assert "hello" in cleaned
+    assert "red" in cleaned
     assert "world" in cleaned
 
 
@@ -96,6 +99,20 @@ def test_final_result_widget_is_constructible_for_terminal_states() -> None:
         terminal_reason="model failure",
     )
     widget.apply_state(failed)
+
+
+def test_final_result_shows_modified_files_without_notes() -> None:
+    widget = FinalResultWidget()
+    state = RunUiState(
+        run_id="run-1",
+        terminal=True,
+        terminal_status="COMPLETED",
+        final_summary="done",
+        modified_files=("a.py", "b.py"),
+    )
+    widget.apply_state(state)
+    content = cast(str, widget._content._Static__content)  # type: ignore[attr-defined]
+    assert content == "✓ completed\ndone\nmodified: a.py · b.py\n0 steps · 0 tokens"
 
 
 def test_brand_widget_accepts_workspace_path() -> None:

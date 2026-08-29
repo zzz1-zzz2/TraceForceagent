@@ -252,8 +252,11 @@ class CodingAgentApp(App):
             await self._update_final(event.run_id)
             self._finish_agent_input()
         elif isinstance(event, RunFailed):
+            for tool_key, tool_state in self._ui_state.tools.items():
+                tool_widget = self._tool_widgets.get(tool_key)
+                if tool_widget is not None:
+                    tool_widget.apply_state(tool_state)
             await self._update_final(event.run_id)
-            await self._append(NoticeWidget(event.error or event.error_type, level="error"))
             self._finish_agent_input()
         elif isinstance(event, (TurnStarted, TurnEnded)):
             return
