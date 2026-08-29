@@ -32,13 +32,16 @@ jobs:
         run: |
           python -m pytest tests/ -q --maxfail=1 --tb=short
 
-      - name: Type-check lifecycle and trajectory modules
+      - name: Type-check lifecycle, trajectory, and TUI modules
         run: |
           python -m mypy \
             src/coding_agent/events.py \
             src/coding_agent/emitter.py \
             src/coding_agent/trajectory \
-            src/coding_agent/agent/loop.py
+            src/coding_agent/agent/loop.py \
+            src/coding_agent/tui/bridge.py \
+            src/coding_agent/tui/state.py \
+            src/coding_agent/tui/app.py
 
       - name: Smoke-check CLI loads
         # 不依赖 ripgrep / API key,只验证 CLI module 能正常 import + typer

@@ -11,11 +11,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
-from pathlib import Path
+from enum import StrEnum
 
 
-class CommandKind(str, Enum):
+class CommandKind(StrEnum):
     AGENT = "agent"  # 默认：完整工具循环
     CHAT = "chat"  # 多轮纯对话
     WORKSPACE = "workspace"
