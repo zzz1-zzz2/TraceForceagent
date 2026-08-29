@@ -56,13 +56,22 @@ def _present_run_command(state: ToolUiState) -> ToolPresentation:
     arguments = state.arguments
     command = compact_command(arguments.get("command", ""))
     content = remove_command_echo(_content(state), command)
+    # Shell commands almost always finish with the most informative line
+    # (exit status, exception traceback, "FAILED" tail, etc.). Tail-sampling
+    # without a guard can drop it, so we pin the very last line into the
+    # collapsed preview.
+    collapsed = sample_text(
+        content,
+        lines=PREVIEW_LINES,
+        chars=PREVIEW_CHARS,
+        from_end=True,
+        keep_last=True,
+    )
     return _make_presentation(
         title="$ " + clean_text(command, limit=160),
         summary=_summary(state, "running"),
         content=content,
-        collapsed=sample_text(
-            content, lines=PREVIEW_LINES, chars=PREVIEW_CHARS, from_end=True
-        ),
+        collapsed=collapsed,
         preview_kind="terminal",
     )
 

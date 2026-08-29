@@ -139,6 +139,7 @@ class ToolExecutionWidget(Vertical):
         super().__init__(**kwargs)
         self.state = state
         self.expanded = False
+        self._can_expand = present_tool(state).can_expand
         self._header = Static(markup=False)
         self._summary = Static(markup=False)
         self._preview = Static(markup=False)
@@ -153,26 +154,52 @@ class ToolExecutionWidget(Vertical):
         self.render_tool()
 
     def apply_state(self, state: ToolUiState) -> None:
-        """Apply lifecycle state without changing local interaction state."""
+        """Apply lifecycle state without changing local interaction state.
+
+        The user's ``expanded`` flag survives across state updates so that
+        an expanded card stays expanded as new tool results stream in.
+        ``_can_expand`` is re-derived from the latest presentation so that
+        ``toggle_expanded`` and the ``can_expand`` class toggle correctly
+        reflect the new content.
+        """
         self.state = state
+        self._can_expand = present_tool(state).can_expand
         if self.is_mounted:
             self.render_tool()
 
     def set_expanded(self, expanded: bool) -> None:
+        # Record the user's intent verbatim, even when ``can_expand`` is
+        # False: rendering is a no-op in that case, but the flag survives
+        # subsequent state updates that may again produce expandable
+        # content.
+        if self.expanded == expanded:
+            return
         self.expanded = expanded
         self.render_tool()
 
     def toggle_expanded(self) -> None:
+        if not self._can_expand:
+            return
         self.set_expanded(not self.expanded)
 
     async def _on_click(self, event: Click) -> None:
-        if event.button == 1 and event.widget is self:
+        if event.button != 1:
+            return
+        # Treat the card surface and its direct sub-components as a single
+        # click target so users can expand by clicking the header, summary,
+        # or preview area in addition to the container itself.
+        if event.widget is self or event.widget in (
+            self._header,
+            self._summary,
+            self._preview,
+        ):
             self.toggle_expanded()
             event.stop()
+            return
         await super()._on_click(event)
 
     async def _on_key(self, event: Key) -> None:
-        if event.key in {"enter", "space"}:
+        if event.key in {"enter", "space"} and self._can_expand:
             self.toggle_expanded()
             event.stop()
             return
@@ -185,6 +212,7 @@ class ToolExecutionWidget(Vertical):
         for name in ("success", "error", "cancelled"):
             self.set_class(status == name, name)
         presentation = present_tool(self.state)
+        self._can_expand = presentation.can_expand
         self.set_class(self.expanded, "expanded")
         self._header.update(f"{icon} {presentation.title}")
         self._summary.update(presentation.summary)

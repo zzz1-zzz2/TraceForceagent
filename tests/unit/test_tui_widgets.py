@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import MappingProxyType
 from typing import cast
 
+from coding_agent.tui.formatting import bound_lines, format_path_range, sample_text
 from coding_agent.tui.presenters import present_tool
 from coding_agent.tui.state import RunUiState, ToolUiState, ToolUiStatus
 from coding_agent.tui.widgets import (
@@ -182,3 +184,72 @@ def test_tool_widget_expansion_is_local_and_survives_state_updates() -> None:
 def test_brand_widget_accepts_workspace_path() -> None:
     widget = BrandBarWidget(Path("/tmp/workspace"))
     assert widget.workspace == Path("/tmp/workspace")
+
+
+# --- P2-1C.3.1 Tool UI hardening ---------------------------------------------
+
+
+def test_format_path_range_accepts_mapping_proxy() -> None:
+    """Reducer-produced immutable arguments must keep their line range."""
+    args = MappingProxyType({"path": "src/app.py", "start_line": 3, "end_line": 9})
+    assert format_path_range(args, "src/app.py") == "src/app.py:3–9"
+
+
+def test_format_path_range_returns_path_when_not_mapping() -> None:
+    assert format_path_range("not a mapping", "src/app.py") == "src/app.py"
+    assert format_path_range(None, "src/app.py") == "src/app.py"
+
+
+def test_bound_lines_keep_last_pins_tail_error_line() -> None:
+    """Tail sampling must include the very last source line so the user
+    always sees the final error / exit reason from a shell command."""
+    text = "\n".join(f"line-{i}" for i in range(40)) + "\nTraceback (most recent call last)"
+    bounded = bound_lines(
+        text, max_lines=5, max_chars=None, from_end=True, keep_last=True
+    )
+    lines = bounded.splitlines()
+    assert lines[-1] == "Traceback (most recent call last)"
+    assert len(lines) <= 5
+    # Earlier truncation marker still appears.
+    assert any("earlier lines" in line for line in lines)
+
+
+def test_sample_text_keep_last_does_not_drop_when_short_input() -> None:
+    short = "ok\nfail"
+    assert sample_text(short, lines=12, from_end=True, keep_last=True).endswith("fail")
+
+
+def test_run_command_presenter_keeps_last_error_line_in_collapsed_preview() -> None:
+    state = _tool(
+        content="\n".join(f"line-{i}" for i in range(40)) + "\nTraceback (most recent call last)"
+    )
+    presentation = present_tool(state)
+    assert "Traceback (most recent call last)" in presentation.collapsed_text
+    # The very first lines are dropped by tail sampling, but the last line
+    # is preserved regardless of the cap.
+    assert "line-0" not in presentation.collapsed_text
+
+
+def test_widget_toggle_is_noop_when_cannot_expand() -> None:
+    widget = ToolExecutionWidget(_tool(content="short"))
+    assert not present_tool(widget.state).can_expand
+    widget.toggle_expanded()
+    assert widget.expanded is False
+    widget.set_expanded(True)
+    # Setting expanded to True is allowed (records intent), but toggle stays
+    # gated on ``can_expand`` so click/keyboard presses remain a no-op when
+    # there is nothing more to show.
+    widget.toggle_expanded()
+    assert widget.expanded is True
+
+
+def test_widget_apply_state_updates_can_expand_but_keeps_expanded_flag() -> None:
+    long_content = "\n".join(f"line-{i}" for i in range(60))
+    widget = ToolExecutionWidget(_tool(content=long_content))
+    widget.set_expanded(True)
+    assert widget.expanded is True
+    # Shrink the content so can_expand becomes False — the user's expanded
+    # intent is preserved across state updates; only ``toggle_expanded``
+    # gates on the new ``can_expand``.
+    widget.apply_state(_tool(content="tiny", status=ToolUiStatus.SUCCESS, success=True))
+    assert widget.expanded is True

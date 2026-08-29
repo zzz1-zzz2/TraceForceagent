@@ -334,7 +334,20 @@ class CodingAgentApp(App):
             widget.set_expanded(expand)
 
     async def on_key(self, event: Key) -> None:
-        """Return focus to the composer on Escape without cancelling a run."""
-        if event.key == "escape":
-            self.query_one("#input", Input).focus()
+        """Return focus to the composer on Escape without cancelling a run.
+
+        Skips the focus call when the Input is currently disabled (a worker
+        is running): focusing a disabled widget raises, and we do not want
+        the act of pressing Escape to surface a redraw error.
+        """
+        if event.key != "escape":
+            return
+        try:
+            input_widget = self.query_one("#input", Input)
+        except Exception:
+            return
+        if input_widget.disabled:
             event.stop()
+            return
+        input_widget.focus()
+        event.stop()

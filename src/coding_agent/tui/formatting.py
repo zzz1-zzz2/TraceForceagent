@@ -46,12 +46,18 @@ def bound_lines(
     max_lines: int,
     max_chars: int | None = None,
     from_end: bool = False,
+    keep_last: bool = False,
 ) -> str:
     """Sanitize and bound a text block by lines and then characters.
 
-    The returned value never contains more than ``max_lines`` lines or more than
-    ``max_chars`` characters. A marker occupies one line when line sampling is
-    required, so the limits are absolute rather than approximate.
+    The returned value never contains more than ``max_lines`` lines or more
+    than ``max_chars`` characters. A marker occupies one line when line
+    sampling is required, so the limits are absolute rather than
+    approximate.
+
+    When ``from_end`` and ``keep_last`` are both set, the very last line
+    of the source is reserved — even if it would be dropped by tail
+    sampling — so that shell output never hides the final error line.
     """
     if max_lines <= 0:
         return ""
@@ -61,16 +67,25 @@ def bound_lines(
         return ""
 
     if len(lines) > max_lines:
-        keep = max_lines - 1
-        marker = f"… ({len(lines) - keep} earlier lines)" if from_end else (
-            f"… ({len(lines) - keep} later lines)"
+        marker = f"… ({len(lines) - max_lines + 1} earlier lines)" if from_end else (
+            f"… ({len(lines) - max_lines + 1} later lines)"
         )
-        if keep == 0:
+        if max_lines == 1:
             selected = ["…"]
+        elif from_end and keep_last:
+            # Reserve one slot for the marker and one for the absolute last
+            # line; the remaining slots hold a tail of the lines that come
+            # before it. If we cannot fit any of those, we still guarantee
+            # the last line and the marker are visible.
+            inner = max(max_lines - 2, 0)
+            middle = lines[-inner - 1:-1] if inner else []
+            selected = [marker, *middle, lines[-1]][:max_lines]
         elif from_end:
-            selected = [marker, *lines[-keep:]]
+            keep = max_lines - 1
+            selected = [marker, *lines[-keep:]][:max_lines]
         else:
-            selected = [*lines[:keep], marker]
+            keep = max_lines - 1
+            selected = [*lines[:keep], marker][:max_lines]
         text = "\n".join(selected)
 
     if max_chars is not None:
@@ -84,9 +99,21 @@ def sample_text(
     lines: int = PREVIEW_LINES,
     chars: int = PREVIEW_CHARS,
     from_end: bool = False,
+    keep_last: bool = False,
 ) -> str:
-    """Return a bounded head or tail sample suitable for a collapsed card."""
-    return bound_lines(value, max_lines=lines, max_chars=chars, from_end=from_end)
+    """Return a bounded head or tail sample suitable for a collapsed card.
+
+    ``keep_last`` is forwarded to :func:`bound_lines` and is meaningful only
+    when ``from_end`` is true; it pins the very last source line into the
+    output so tail sampling never hides the final error of a shell command.
+    """
+    return bound_lines(
+        value,
+        max_lines=lines,
+        max_chars=chars,
+        from_end=from_end,
+        keep_last=keep_last,
+    )
 
 
 def preview(value: object, *, lines: int = PREVIEW_LINES) -> str:
@@ -134,8 +161,14 @@ def count_diff_lines(lines: Iterable[str]) -> tuple[int, int, int]:
 
 
 def format_path_range(arguments: Mapping[str, object] | object, path: str) -> str:
-    """Add a read-file line range when the tool arguments provide one."""
-    if not isinstance(arguments, dict):
+    """Add a read-file line range when the tool arguments provide one.
+
+    ``arguments`` may be a plain ``dict``, a ``MappingProxyType``, or any
+    other read-only mapping produced by the reducer. The previous
+    implementation rejected ``MappingProxyType`` because it tested
+    ``isinstance(arguments, dict)``; this version accepts any ``Mapping``.
+    """
+    if not isinstance(arguments, Mapping):
         return path
     start = arguments.get("start_line")
     end = arguments.get("end_line")
