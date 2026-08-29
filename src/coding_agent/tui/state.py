@@ -107,6 +107,8 @@ class RunUiState:
     finish_accepted: bool = False
     final_summary: str = ""
     final_validation: str = ""
+    final_notes: str = ""
+    validation_skipped_reason: str = ""
     terminal: bool = False
     terminal_status: str = ""
     terminal_reason: str = ""
@@ -173,6 +175,8 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             finish_accepted=False,
             final_summary="",
             final_validation="",
+            final_notes="",
+            validation_skipped_reason="",
             modified_files=(),
         )
 
@@ -268,6 +272,8 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             finish_accepted=True,
             final_summary=event.summary,
             final_validation=event.validation,
+            final_notes=event.notes,
+            validation_skipped_reason=event.validation_skipped_reason,
             terminal_status=final.status,
             terminal_reason=final.reason,
             modified_files=tuple(final.modified_files),
@@ -298,6 +304,8 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             terminal_reason=final.reason,
             final_summary=final.summary or state.final_summary,
             final_validation=final.validation or state.final_validation,
+            final_notes=state.final_notes,
+            validation_skipped_reason=final.validation_skipped_reason or state.validation_skipped_reason,
             modified_files=tuple(final.modified_files),
         )
 
@@ -321,6 +329,8 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             terminal_error=event.error or event.error_type,
             final_summary=final.summary or state.final_summary,
             final_validation=final.validation or state.final_validation,
+            final_notes=state.final_notes,
+            validation_skipped_reason=final.validation_skipped_reason or state.validation_skipped_reason,
             modified_files=tuple(final.modified_files),
         )
 
