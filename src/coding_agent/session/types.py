@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-
 MAX_MESSAGE_CONTENT_CHARS = 64_000
 MAX_MESSAGE_FIELD_CHARS = 16_000
 MAX_SNAPSHOT_FIELD_CHARS = 4_000

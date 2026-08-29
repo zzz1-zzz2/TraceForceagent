@@ -226,3 +226,108 @@ def test_rejected_finish_does_not_enter_session_history(monkeypatch, tmp_path):
     assert result.stop_reason == "max_model_calls"
     assert not any(message.tool_name == "finish" for message in session.messages)
     assert [message.role for message in session.messages] == ["user"]
+
+
+def test_second_run_prompt_does_not_duplicate_current_task(monkeypatch, tmp_path):
+    """Card C E2E: the second run's current task must appear exactly once in the
+    model prompt (as the P0 ``# Task`` message), with the first run's task
+    appearing once as P3 history. ``Brief`` and ``Working State`` must echo
+    the task via the ``[current task]`` marker, not the raw text.
+    """
+    model = _patch_reply_model(monkeypatch, ["first answer", "second answer"])
+    session = AgentSession(tmp_path)
+    config = _config(tmp_path, tmp_path / "trace")
+    run("first question", tmp_path, config, session=session)
+    run("second question", tmp_path, config, session=session)
+
+    second_prompt = model.messages[-1]
+
+    # The current task is injected exactly once via the P0 ``# Task`` slot.
+    assert sum(
+        msg.get("role") == "user"
+        and "second question" in (msg.get("content") or "")
+        and "Task" in (msg.get("content") or "")
+        for msg in second_prompt
+    ) == 1
+    # The first task appears in history (P3) but not as the active task.
+    assert sum(
+        msg.get("role") == "user"
+        and "first question" in (msg.get("content") or "")
+        for msg in second_prompt
+    ) == 1
+    # The first answer appears in history (P3).
+    assert any(
+        msg.get("role") == "assistant" and "first answer" in (msg.get("content") or "")
+        for msg in second_prompt
+    )
+    # Derived sections (Brief / Working State) must NOT carry the raw text;
+    # the marker ``[current task]`` replaces it.
+    for msg in second_prompt:
+        text = msg.get("content") or ""
+        if "[current task]" not in text:
+            assert "second question" not in text or msg.get("role") != "assistant", (
+                f"Brief/Working State must not echo the raw current task: {text[:200]}"
+            )
+
+
+def test_second_run_can_reference_first_run_tool_and_finish(tmp_path):
+    """Card C E2E: a second run that begins after the first finishes sees the
+    first run's tool bundle (call + result) and the finish text fact, while
+    finish itself does not produce a fake tool_result.
+    """
+    session = AgentSession(tmp_path)
+    first = session.begin_run("inspect")
+    session.record_user("inspect", run_id=first.run_id)
+    session.record_tool_call(
+        tool_call_id="call-A",
+        tool_name="list_files",
+        arguments={"path": "."},
+        run_id=first.run_id,
+    )
+    session.record_tool_result(
+        tool_call_id="call-A",
+        tool_name="list_files",
+        content="hello.py",
+        success=True,
+        run_id=first.run_id,
+    )
+    session.record_message(
+        "assistant",
+        "[finish] done inspecting",
+        run_id=first.run_id,
+        tool_name="finish",
+        arguments={"summary": "done inspecting", "validation": "not needed"},
+    )
+    session.complete_run(first, PreviousRunSnapshot(
+        run_id=first.run_id, outcome="completed", summary="done inspecting"
+    ))
+
+    second = session.begin_run("follow up")
+    session.record_user("follow up", run_id=second.run_id)
+    state = AgentState.initialize("follow up", tmp_path)
+    brief = TaskBrief.from_user_task("follow up")
+    messages = ContextManager(_config(tmp_path, tmp_path / "trace")).build(
+        state, brief, session=session, current_run_id=second.run_id
+    )
+
+    # First-run tool call+result is emitted as a single bundle.
+    tool_calls = [
+        m for m in messages
+        if m.get("role") == "assistant"
+        and any(tc.get("id") == "call-A" for tc in m.get("tool_calls") or [])
+    ]
+    tool_results = [
+        m for m in messages
+        if m.get("role") == "tool" and m.get("tool_call_id") == "call-A"
+    ]
+    assert tool_calls and tool_results
+
+    # Finish text fact is rendered; no fake tool_result for finish.
+    assert any("[finish] done inspecting" in (m.get("content") or "") for m in messages)
+    assert not any(
+        m.get("role") == "tool" and m.get("tool_call_id", "").startswith("tool-call-finish")
+        for m in messages
+    )
+
+    # The current second-run task appears once and only once.
+    assert sum("follow up" in (m.get("content") or "") for m in messages) == 1
