@@ -69,6 +69,10 @@ target-version = "py311"
 select = ["E", "F", "I", "W", "UP", "B"]
 ignore = ["E501"]  # line-too-long 由 formatter 处理
 
+[tool.ruff.lint.per-file-ignores]
+# Typer's idiomatic Option/Argument usage triggers B008 by design.
+"src/coding_agent/cli.py" = ["B008"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = false

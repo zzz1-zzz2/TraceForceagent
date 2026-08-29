@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import httpx2 as _httpx
@@ -18,6 +19,24 @@ from openai import APIError, APITimeoutError, OpenAI, RateLimitError
 
 from coding_agent.config import AgentConfig
 from coding_agent.model.types import ModelResponse, TokenUsage, ToolCall
+
+
+@dataclass(frozen=True, slots=True)
+class MissingCredentialsError(RuntimeError):
+    """Raised when the active provider has no resolved API key.
+
+    ``provider`` and ``suggestion`` are surfaced so the CLI/TUI can render
+    a redacted, actionable error without leaking SDK internals.
+    """
+
+    provider: str
+    suggestion: str
+
+    def __str__(self) -> str:  # pragma: no cover - trivial formatting
+        return (
+            f"No API key resolved for provider {self.provider!r}. "
+            f"{self.suggestion}"
+        )
 
 
 class ModelClient:
@@ -54,27 +73,38 @@ class ModelClient:
         )
 
     @classmethod
-    def from_config(cls, config: AgentConfig) -> "ModelClient":
-        """从 AgentConfig 构造。"""
-        # 兼容多 provider 的 API key
-        api_key = (
-            config.api_key
-            or ""
-        )
-        if not api_key:
-            # 尝试从常见环境变量读取
-            import os
+    def from_config(cls, config: AgentConfig) -> ModelClient:
+        """Construct from an :class:`AgentConfig` produced by ``load_config``.
 
-            api_key = (
-                os.environ.get("DEEPSEEK_API_KEY")
-                or os.environ.get("OPENAI_API_KEY")
-                or os.environ.get("GLM_API_KEY")
-                or os.environ.get("QWEN_API_KEY")
-                or os.environ.get("KIMI_API_KEY")
-                or ""
+        If the active provider has no resolved API key, raise
+        :class:`MissingCredentialsError` rather than constructing a half-broken
+        client. This is the single chokepoint where credential errors are
+        surfaced; ``AgentLoop`` and the TUI catch it and display a redacted
+        message instead of letting the OpenAI SDK emit its own.
+        """
+        if not config.api_key:
+            from coding_agent.config import CROSS_PROVIDER_ENV
+
+            envs = {
+                "deepseek": "DEEPSEEK_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "glm": "GLM_API_KEY",
+                "qwen": "QWEN_API_KEY",
+                "kimi": "KIMI_API_KEY",
+            }
+            provider_env = envs.get(config.active_provider, CROSS_PROVIDER_ENV)
+            suggestion = (
+                f"Set {provider_env} in your shell, or pass --env-file pointing "
+                f"to a file containing {provider_env}=... "
+                f"(or {CROSS_PROVIDER_ENV}=... as a cross-provider override)."
             )
+            raise MissingCredentialsError(
+                provider=config.active_provider,
+                suggestion=suggestion,
+            )
+
         return cls(
-            api_key=api_key,
+            api_key=config.api_key,
             base_url=config.active_base_url,
             model=config.active_model,
             temperature=config.temperature,
@@ -114,7 +144,7 @@ class ModelClient:
                     time.sleep(2 ** attempt)
                 else:
                     raise
-            except Exception as e:
+            except Exception:
                 # 不可重试错误（如 schema 错误）
                 raise
 

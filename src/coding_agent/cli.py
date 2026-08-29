@@ -1,10 +1,25 @@
-"""CLI 入口（Typer）。
+"""CLI entry point (Typer).
 
-支持的命令：
-  - python -m coding_agent --task "..." --workspace ./repo
-  - python -m coding_agent --task-file task.md --workspace ./repo
-  - python -m coding_agent --tui
-  - python -m coding_agent --help
+Commands:
+
+* ``python -m coding_agent run --task "..." --workspace ./repo``
+* ``python -m coding_agent run --task-file task.md --workspace ./repo``
+* ``python -m coding_agent tui [--workspace DIR]``
+* ``python -m coding_agent check``
+* ``python -m coding_agent --help``
+
+Global flags:
+
+* ``--env-file <path>``: explicitly load this env file for credentials and
+  base URL. The workspace's own ``.env`` is **never** auto-loaded.
+* ``--provider <id>``: select a known provider. Forces credential lookup
+  through that provider's env vars only (no cross-provider fallback unless
+  ``TRACEFORCE_API_KEY`` is set).
+
+Run-level flags:
+
+* ``--base-url <url>``: override the resolved base URL.
+* ``--model <name>``: override the resolved model name.
 """
 
 from __future__ import annotations
@@ -16,6 +31,8 @@ import typer
 from rich.console import Console
 
 from coding_agent import __version__
+from coding_agent.config import PROVIDER_IDS, AgentConfig, load_config
+from coding_agent.model.client import MissingCredentialsError
 
 app = typer.Typer(
     name="coding-agent",
@@ -33,42 +50,125 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _env_file_callback(value: Path | None) -> Path | None:
+    if value is None:
+        return None
+    if not value.exists():
+        console.print(f"[red]--env-file not found:[/red] {value}")
+        raise typer.Exit(2)
+    return value
+
+
+def _provider_callback(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value not in PROVIDER_IDS:
+        console.print(
+            f"[red]Unknown provider {value!r}.[/red] "
+            f"Available: {', '.join(PROVIDER_IDS)}"
+        )
+        raise typer.Exit(2)
+    return value
+
+
 @app.callback()
 def main(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False,
         "--version",
         callback=_version_callback,
         is_eager=True,
-        help="显示版本",
+        help="Show version",
+    ),
+    env_file: Path | None = typer.Option(
+        None,
+        "--env-file",
+        callback=_env_file_callback,
+        help="Explicit env file to load (e.g. ~/traceforce.env). The workspace's "
+        "own .env is never auto-loaded.",
+    ),
+    provider: str | None = typer.Option(
+        None,
+        "--provider",
+        callback=_provider_callback,
+        help="Active provider id. Determines which env var carries the API key.",
     ),
 ) -> None:
-    """Coding Agent CLI 入口。"""
+    """TraceForce coding agent CLI."""
+    # Stash shared options in ctx.obj so subcommands can read them. Typer's
+    # callback return values for `--env-file` / `--provider` do not survive
+    # into ctx.params automatically, so we forward them explicitly.
+    ctx.ensure_object(dict)
+    ctx.obj["env_file"] = env_file
+    ctx.obj["provider"] = provider
+
+
+def _resolve_config(env_file: Path | None, provider: str | None) -> AgentConfig:
+    """Shared configuration loader used by every command."""
+    return load_config(env_file=env_file, provider=provider)
+
+
+def _print_credentials_status(config: AgentConfig) -> None:
+    """Render the current provider/key/source without leaking the key itself."""
+    if config.api_key:
+        masked = f"{config.api_key[:6]}…{config.api_key[-2:]}" if len(config.api_key) > 8 else "***"
+        console.print(
+            f"[green]✓[/green] provider={config.active_provider} "
+            f"source={config.credential_source} env={config.credential_env or '?'} "
+            f"key={masked}"
+        )
+        console.print(
+            f"  model={config.active_model} base_url={config.active_base_url}"
+        )
+    else:
+        env_var = {
+            "deepseek": "DEEPSEEK_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "glm": "GLM_API_KEY",
+            "qwen": "QWEN_API_KEY",
+            "kimi": "KIMI_API_KEY",
+        }.get(config.active_provider, "TRACEFORCE_API_KEY")
+        console.print(
+            f"[red]✗[/red] provider={config.active_provider} no API key resolved. "
+            f"Set {env_var} in your shell, or pass --env-file pointing to a file "
+            f"containing {env_var}=..."
+        )
 
 
 @app.command()
 def run(
-    task: str = typer.Option(None, "--task", "-t", help="任务描述字符串"),
-    task_file: Path = typer.Option(
-        None, "--task-file", "-f", help="从文件加载任务描述"
+    ctx: typer.Context,
+    task: str | None = typer.Option(None, "--task", "-t", help="Task description"),
+    task_file: Path | None = typer.Option(
+        None, "--task-file", "-f", help="Load task from file"
     ),
     workspace: Path = typer.Option(
-        "./workspace", "--workspace", "-w", help="工作区目录"
+        "./workspace", "--workspace", "-w", help="Workspace directory"
     ),
-    model: str = typer.Option(None, "--model", "-m", help="覆盖模型名"),
-    max_steps: int = typer.Option(None, "--max-steps", help="覆盖最大步数"),
-    task_mode: str = typer.Option(
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Override the resolved base URL"
+    ),
+    model: str | None = typer.Option(
+        None, "--model", "-m", help="Override the resolved model name"
+    ),
+    max_steps: int | None = typer.Option(
+        None, "--max-steps", help="Override max steps"
+    ),
+    task_mode: str | None = typer.Option(
         None,
         "--task-mode",
-        help="任务模式：existing_repository 或 greenfield（默认自动推断）",
+        help="Task mode: existing_repository or greenfield (default: auto)",
     ),
-    benchmark: bool = typer.Option(False, "--benchmark", help="Benchmark 模式（禁止交互）"),
+    benchmark: bool = typer.Option(False, "--benchmark", help="Benchmark mode"),
 ) -> None:
-    """运行 Agent 完成一个编程任务。"""
-    # 加载配置
-    from coding_agent.config import AgentConfig, load_config
+    """Run the Agent on a single coding task."""
+    env_file: Path | None = ctx.obj.get("env_file") if ctx.obj else None
+    provider: str | None = ctx.obj.get("provider") if ctx.obj else None
 
-    config = load_config()
+    config = _resolve_config(env_file, provider)
+    if base_url:
+        config.active_base_url = base_url
     if model:
         config.active_model = model
     if max_steps:
@@ -76,37 +176,21 @@ def run(
     if benchmark:
         config.benchmark_mode = True
 
-    # 解析任务
     if task_file:
         task_text = task_file.read_text(encoding="utf-8")
     elif task:
         task_text = task
     else:
-        console.print("[red]必须提供 --task 或 --task-file[/red]")
+        console.print("[red]Must provide --task or --task-file[/red]")
         raise typer.Exit(1)
 
-    # 准备 workspace
     workspace.mkdir(parents=True, exist_ok=True)
     config.workspace_root = workspace.resolve()
 
-    # Fallback：pydantic-settings 不会自动把 DEEPSEEK_API_KEY 映射到 api_key 字段
-    # 这里与 ModelClient.from_config 保持一致，从常见 env var 读取
     if not config.api_key:
-        import os as _os
-        config.api_key = (
-            _os.environ.get("DEEPSEEK_API_KEY")
-            or _os.environ.get("OPENAI_API_KEY")
-            or _os.environ.get("GLM_API_KEY")
-            or _os.environ.get("QWEN_API_KEY")
-            or _os.environ.get("KIMI_API_KEY")
-            or ""
-        )
-
-    if not config.api_key:
-        console.print("[red]未配置 API key，请设置 .env 中的 DEEPSEEK_API_KEY 或 export DEEPSEEK_API_KEY=xxx[/red]")
+        _print_credentials_status(config)
         raise typer.Exit(1)
 
-    # 运行
     from coding_agent.agent.loop import run as agent_run
 
     try:
@@ -116,54 +200,73 @@ def run(
             config=config,
             task_mode=task_mode,
         )
-        console.print(f"\n[green]✓ 完成：[/green] {result.summary}")
+        console.print(f"\n[green]✓ done:[/green] {result.summary}")
         console.print(f"[dim]Stop reason: {result.stop_reason}[/dim]")
         console.print(f"[dim]Steps: {result.steps}, Tokens: {result.total_tokens}[/dim]")
+    except MissingCredentialsError as exc:
+        console.print(f"[red]✗ {exc}[/red]")
+        raise typer.Exit(1) from exc
     except KeyboardInterrupt:
-        console.print("\n[yellow]用户中断[/yellow]")
+        console.print("\n[yellow]User interrupted[/yellow]")
         sys.exit(130)
     except Exception as e:
-        console.print(f"\n[red]错误：{e}[/red]")
-        raise typer.Exit(1)
+        console.print(f"\n[red]Error: {e}[/red]")
+        raise typer.Exit(1) from e
 
 
 @app.command()
 def tui(
+    ctx: typer.Context,
     workspace: Path | None = typer.Option(
         None,
         "--workspace",
         "-w",
-        help="Agent 工作目录（默认当前目录）",
+        help="Agent workspace (default: current directory)",
     ),
 ) -> None:
-    """启动 Textual TUI。"""
+    """Launch the Textual TUI."""
     from coding_agent.tui.app import CodingAgentApp
 
     CodingAgentApp(workspace=workspace).run()
 
 
 @app.command()
-def check() -> None:
-    """检查环境配置（API key、依赖）。"""
-    from coding_agent.config import load_config
+def check(ctx: typer.Context) -> None:
+    """Check environment configuration (API key, dependencies)."""
+    env_file: Path | None = ctx.obj.get("env_file") if ctx.obj else None
+    provider: str | None = ctx.obj.get("provider") if ctx.obj else None
 
-    config = load_config()
-    if config.api_key:
-        console.print(f"[green]✓[/green] API key 已配置（{config.api_key[:6]}...）")
-    else:
-        console.print("[red]✗[/red] API key 未配置")
+    config = _resolve_config(env_file, provider)
+    _print_credentials_status(config)
 
     import shutil
 
     if shutil.which("rg"):
-        console.print("[green]✓[/green] ripgrep 已安装")
+        console.print("[green]✓[/green] ripgrep installed")
     else:
-        console.print("[red]✗[/red] ripgrep 未安装（sudo apt install ripgrep）")
+        console.print("[red]✗[/red] ripgrep not installed (sudo apt install ripgrep)")
 
     if shutil.which("git"):
-        console.print("[green]✓[/green] git 已安装")
+        console.print("[green]✓[/green] git installed")
     else:
-        console.print("[red]✗[/red] git 未安装")
+        console.print("[red]✗[/red] git not installed")
+
+
+@app.command()
+def config_show(ctx: typer.Context) -> None:
+    """Show the resolved configuration (without leaking the API key)."""
+    env_file: Path | None = ctx.obj.get("env_file") if ctx.obj else None
+    provider: str | None = ctx.obj.get("provider") if ctx.obj else None
+
+    config = _resolve_config(env_file, provider)
+    console.print(f"[bold]provider[/bold]      {config.active_provider}")
+    console.print(f"[bold]base_url[/bold]     {config.active_base_url}")
+    console.print(f"[bold]model[/bold]        {config.active_model}")
+    console.print(f"[bold]credential_source[/bold]  {config.credential_source}")
+    console.print(f"[bold]credential_env[/bold]     {config.credential_env or '?'}")
+    console.print(f"[bold]api_key_present[/bold]    {'yes' if config.api_key else 'no'}")
+    console.print(f"[bold]workspace_root[/bold]     {config.workspace_root}")
+    console.print(f"[bold]trace_root[/bold]         {config.trace_root}")
 
 
 if __name__ == "__main__":
