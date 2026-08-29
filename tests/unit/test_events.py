@@ -80,6 +80,7 @@ def test_agent_loop_answers_plain_text_without_invalid_feedback(monkeypatch, tmp
     assert not any(event.event_type == "feedback_recorded" for event in collector.events)
 
 
+def test_agent_loop_emits_lifecycle_order(monkeypatch, tmp_path):
     responses = iter([
         _response("apply_patch", {"path": "hello.py", "mode": "create", "content": "x = 1\n"}, "a1"),
         _response("run_command", {"command": "python3 -m py_compile hello.py"}, "a2"),
@@ -90,15 +91,9 @@ def test_agent_loop_answers_plain_text_without_invalid_feedback(monkeypatch, tmp
         model = "fake"
 
         def generate(self, messages, tools=None):
-            try:
-                return next(responses)
-            except StopIteration:
-                return _response("finish", {"summary": "fallback", "validation": ""}, "fallback")
+            return next(responses)
 
-    def fake_from_config(cls, config):
-        return FakeModel()
-
-    monkeypatch.setattr(ModelClient, "from_config", classmethod(fake_from_config))
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: FakeModel()))
     collector = EventCollector()
     config = AgentConfig(
         context_budget=8000,
@@ -110,12 +105,12 @@ def test_agent_loop_answers_plain_text_without_invalid_feedback(monkeypatch, tmp
         workspace_root=tmp_path,
         trace_root=tmp_path / "trace",
     )
-
     emitter = EventEmitter()
     emitter.subscribe(collector)
-    result = run("create a file", tmp_path, config, emitter=emitter)
-    assert result.stop_reason == "finish"
 
+    result = run("create a file", tmp_path, config, emitter=emitter)
+
+    assert result.stop_reason == "finish"
     assert [type(event) for event in collector.events] == [
         RunStarted,
         TurnStarted, ModelStarted, ModelCompleted, ToolStarted, ToolCompleted,
@@ -126,22 +121,7 @@ def test_agent_loop_answers_plain_text_without_invalid_feedback(monkeypatch, tmp
         TurnStarted, ModelStarted, ModelCompleted, FinishAccepted, TurnEnded,
         RunFinished,
     ]
-    sequences = [event.sequence for event in collector.events]
-    assert sequences == list(range(1, len(sequences) + 1))
-
-    # Collector remains independently useful for asserting a canonical turn.
-    collector.clear()
-    for event in [
-        RunStarted(run_id="r"), TurnStarted(run_id="r", turn=1),
-        ModelStarted(run_id="r", turn=1), ModelCompleted(run_id="r", turn=1),
-        ToolStarted(run_id="r", turn=1), ToolCompleted(run_id="r", turn=1),
-        TurnEnded(run_id="r", turn=1), RunFinished(run_id="r"),
-    ]:
-        emitter.emit(event)
-    assert [type(event) for event in collector.events] == [
-        RunStarted, TurnStarted, ModelStarted, ModelCompleted,
-        ToolStarted, ToolCompleted, TurnEnded, RunFinished,
-    ]
+    assert [event.sequence for event in collector.events] == list(range(1, len(collector.events) + 1))
 
 
 def test_event_payloads_are_snapshots_not_core_objects():

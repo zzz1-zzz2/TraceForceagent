@@ -273,7 +273,19 @@ class CodingAgentApp(App):
                 await self._append(assistant_widget)
             else:
                 assistant_widget.set_content(event.text)
-        elif isinstance(event, (ToolStarted, ToolCompleted, ToolFailed)):
+        elif isinstance(event, ToolStarted):
+            tool_key = (event.run_id, event.action_id)
+            tool_state = self._ui_state.tools.get(tool_key)
+            if tool_state is None:
+                return
+            tool_widget = self._tool_widgets.get(tool_key)
+            if tool_widget is None:
+                tool_widget = ToolExecutionWidget(tool_state)
+                self._tool_widgets[tool_key] = tool_widget
+                await self._append(tool_widget)
+            else:
+                tool_widget.apply_state(tool_state)
+        elif isinstance(event, (ToolCompleted, ToolFailed)):
             tool_key = (event.run_id, event.action_id)
             tool_state = self._ui_state.tools.get(tool_key)
             if tool_state is None:

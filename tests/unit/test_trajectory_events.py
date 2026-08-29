@@ -85,6 +85,7 @@ def test_assistant_reply_serializes_as_distinct_terminal_record():
     assert record["reason"] == "assistant_reply"
 
 
+def test_run_finished_serializes_terminal_record():
     record = event_to_record(RunFinished(
         run_id="r",
         sequence=3,

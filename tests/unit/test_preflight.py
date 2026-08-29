@@ -87,8 +87,12 @@ def test_preflight_reports_missing_tool(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(shutil, "which", lambda name: None)
     config = _make_config()
     result = run_preflight(config, require_credentials=False)
-    assert "rg" in result.failing_names()
+    assert "rg" not in result.failing_names()
     assert "git" in result.failing_names()
+    rg_checks = [check for check in result.checks if check.name == "rg"]
+    assert len(rg_checks) == 1
+    assert rg_checks[0].ok
+    assert "degrade gracefully" in rg_checks[0].detail
 
 
 def test_preflight_workspace_check_creates_or_skips(tmp_path: Path) -> None:

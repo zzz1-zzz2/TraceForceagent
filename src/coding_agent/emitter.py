@@ -17,6 +17,7 @@ _PERSIST_FIRST_EVENT_TYPES = frozenset({
     "tool_failed",
     "turn_ended",
     "finish_accepted",
+    "assistant_replied",
     "validation_completed",
     "run_finished",
     "run_failed",
