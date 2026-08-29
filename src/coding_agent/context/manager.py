@@ -28,7 +28,6 @@ from coding_agent.context.working_state import WorkingStateBuilder
 from coding_agent.model.types import ToolResult
 from coding_agent.session import AgentSession, PreviousRunSnapshot
 
-
 _log = logging.getLogger(__name__)
 
 
@@ -95,7 +94,7 @@ Workspace path boundary: do not escape the workspace directory."""
         self._feedback: deque[str] = deque(maxlen=10)
         # tiktoken encoder (cl100k_base 是 GPT-4/DeepSeek 通用)
         try:
-            self._enc = tiktoken.get_encoding("cl100k_base")
+            self._enc: Any = tiktoken.get_encoding("cl100k_base")
         except Exception:
             # fallback：粗略按字符数估算
             _log.warning("tiktoken cl100k_base 加载失败，使用字符数估算")
@@ -129,7 +128,7 @@ Workspace path boundary: do not escape the workspace directory."""
     ) -> list[dict[str, Any]]:
         """构造完整 Active Context messages，按 token 预算裁剪。"""
         # 1) 构造候选 messages（按优先级标记）
-        candidates: list[tuple[str, dict]] = []  # (priority, message)
+        candidates: list[tuple[str, Any]] = []  # (priority, message)
 
         # P0: System Prompt
         candidates.append(("P0", {"role": "system", "content": self.SYSTEM_PROMPT}))

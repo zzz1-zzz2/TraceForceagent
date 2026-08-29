@@ -15,8 +15,8 @@ from coding_agent.config import AgentConfig
 from coding_agent.context.manager import ContextManager
 from coding_agent.emitter import EventEmitter
 from coding_agent.events import (
-    FeedbackRecorded,
     AssistantReplied,
+    FeedbackRecorded,
     FinishAccepted,
     ModelCompleted,
     ModelFailed,
@@ -39,7 +39,7 @@ from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
 from coding_agent.model.types import AgentAction, AssistantReplyAction, FinishAction, ToolResult
 from coding_agent.recovery.failure_refresh import FailureAwareRefresher
 from coding_agent.runtime.local import LocalRuntime
-from coding_agent.session import AgentSession, PreviousRunSnapshot, SessionRun
+from coding_agent.session import AgentSession
 from coding_agent.tools.registry import default_registry
 from coding_agent.trajectory import TrajectoryEventSink, TrajectoryLogger
 from coding_agent.workspace.tracker import WorkspaceChangeTracker
@@ -292,9 +292,9 @@ def _run_loop(
                 break
 
             if isinstance(action, FinishAction):
-                accepted, feedback = finish_policy.check(state, action)
+                accepted, feedback_value = finish_policy.check(state, action)
                 if not accepted:
-                    fb_text = f"[FinishPolicy] {feedback}"
+                    fb_text = f"[FinishPolicy] {feedback_value}"
                     context_manager.record_feedback(fb_text)
                     state.consecutive_errors += 1
                     events.emit(FeedbackRecorded(

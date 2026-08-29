@@ -13,7 +13,6 @@ from coding_agent.config import AgentConfig
 from coding_agent.context.manager import ContextManager
 from coding_agent.emitter import EventCollector, EventEmitter
 from coding_agent.events import (
-    AssistantReplied,
     RunFailed,
     RunFinished,
     RunStarted,
