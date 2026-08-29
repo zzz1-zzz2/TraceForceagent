@@ -229,6 +229,8 @@ def test_initial_state_is_empty_and_immutable():
     assert state.tools == {}
     with pytest.raises((AttributeError, TypeError)):
         state.phase = "thinking"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        state.tools["run", "a1"] = None  # type: ignore[index]
 
 
 def test_run_started_replaces_or_initialises_state():

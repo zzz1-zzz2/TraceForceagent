@@ -100,7 +100,7 @@ class RunUiState:
     output_tokens: int = 0
     total_tokens: int = 0
     model_calls: int = 0
-    tools: dict[ToolKey, ToolUiState] | None = None
+    tools: Mapping[ToolKey, ToolUiState] = field(default_factory=lambda: MappingProxyType({}))
     validation: ValidationUiState | None = None
     feedback: tuple[str, ...] = ()
     assistant_messages: tuple[str, ...] = ()
@@ -114,16 +114,12 @@ class RunUiState:
     modified_files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        # A dict is convenient for rendering and lookup while the frozen state
-        # prevents accidental field replacement by widget code. Reducers always
-        # copy it before changing it.
-        if self.tools is None:
-            object.__setattr__(self, "tools", {})
+        object.__setattr__(self, "tools", MappingProxyType(dict(self.tools)))
 
 
 def initial_ui_state(run_id: str = "") -> RunUiState:
     """Create an empty UI state, optionally scoped to a known run."""
-    return RunUiState(run_id=run_id, tools={})
+    return RunUiState(run_id=run_id)
 
 
 def reduce_event(state: RunUiState, event: AgentEvent) -> RunUiState:
@@ -228,7 +224,7 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
 
     if isinstance(event, ToolStarted):
         key = (event.run_id, event.action_id)
-        tools = dict(state.tools or {})
+        tools = dict(state.tools)
         previous = tools.get(key)
         tools[key] = ToolUiState(
             run_id=event.run_id,
@@ -311,7 +307,7 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             key: replace(tool, status=ToolUiStatus.ERROR, error=tool.error or event.error)
             if tool.status is ToolUiStatus.RUNNING
             else tool
-            for key, tool in (state.tools or {}).items()
+            for key, tool in state.tools.items()
         }
         return replace(
             state,
@@ -336,7 +332,7 @@ def _reduce_tool_terminal(
     event: ToolCompleted | ToolFailed,
 ) -> RunUiState:
     key = (event.run_id, event.action_id)
-    tools = dict(state.tools or {})
+    tools = dict(state.tools)
     previous = tools.get(key)
     result = event.result
     success = result.success if result is not None else False

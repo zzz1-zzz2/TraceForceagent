@@ -219,6 +219,23 @@ def test_events_arrive_on_worker_thread_and_sink_queues_messages_for_app_thread(
     app = _MessageCollectingApp()
 
     sink_threads: list[int] = []
+    run_threads: list[int] = []
+
+    def run_fn(*, emitter, **kwargs) -> AgentRunResult:
+        run_threads.append(threading.get_ident())
+        emitter.emit(RunFinished(
+            run_id="r",
+            final_state=RunStateSnapshot(status="COMPLETED", steps=1, total_tokens=0),
+        ))
+        return AgentRunResult(
+            summary="done",
+            validation="",
+            stop_reason="finish",
+            steps=1,
+            total_tokens=0,
+            duration=0.0,
+            trajectory_path=None,
+        )
 
     class _RecordingSink:
         critical = False
@@ -230,20 +247,24 @@ def test_events_arrive_on_worker_thread_and_sink_queues_messages_for_app_thread(
             sink_threads.append(threading.get_ident())
             self.owner.post_message(UiAgentEvent(event))
 
-    worker = AgentWorker(app, task="t", workspace=tmp_path, config=config)
+    worker = AgentWorker(
+        app,
+        task="t",
+        workspace=tmp_path,
+        config=config,
+        run_fn=run_fn,
+    )
 
     main_thread = threading.get_ident()
     sink = _RecordingSink(app)
     worker.sink = sink  # type: ignore[assignment]
-    worker.emitter.subscribe(sink)
+    thread = worker.start()
+    thread.join(timeout=10)
 
-    event = RunFinished(
-        run_id="r",
-        final_state=RunStateSnapshot(status="COMPLETED", steps=1, total_tokens=0),
-    )
-    worker.emitter.emit(event)
-    assert sink_threads and sink_threads[0] != main_thread or sink_threads == [main_thread]
-    assert len(app.messages) == 1
+    assert run_threads and run_threads[0] == thread.ident
+    assert sink_threads == run_threads
+    assert sink_threads[0] != main_thread
+    assert len(app.messages) == 2
 
 
 def test_bridge_does_not_block_event_emitter_when_post_message_returns_false(tmp_path: Path):

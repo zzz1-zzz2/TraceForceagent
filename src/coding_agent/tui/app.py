@@ -209,7 +209,7 @@ class CodingAgentApp(App):
         elif isinstance(event, ToolStarted):
             output.write(f"[tool_call]● {escape(event.tool_name)}[/tool_call]")
         elif isinstance(event, (ToolCompleted, ToolFailed)):
-            tool = (self._ui_state.tools or {}).get((event.run_id, event.action_id))
+            tool = self._ui_state.tools.get((event.run_id, event.action_id))
             status = tool.status.value if tool is not None else "error"
             summary = tool.summary if tool is not None else ""
             output.write(f"[tool_output]⎿ {status}: {escape(summary or event.event_type)}[/tool_output]")
