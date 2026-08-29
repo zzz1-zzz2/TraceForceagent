@@ -5,12 +5,31 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Header, Input, RichLog, Static
 
 from coding_agent import __version__
+from coding_agent.events import (
+    FeedbackRecorded,
+    FinishAccepted,
+    ModelCompleted,
+    ModelFailed,
+    ModelStarted,
+    RunFailed,
+    RunFinished,
+    RunStarted,
+    ToolCompleted,
+    ToolFailed,
+    ToolStarted,
+    TurnEnded,
+    TurnStarted,
+    ValidationCompleted,
+)
+from coding_agent.tui.bridge import AgentWorker, AgentWorkerError, AgentWorkerResult, UiAgentEvent
 from coding_agent.tui.routing import CommandKind, route_input
+from coding_agent.tui.state import RunUiState, initial_ui_state, reduce_event
 
 
 class CodingAgentApp(App):
@@ -36,6 +55,8 @@ class CodingAgentApp(App):
         super().__init__()
         self._workspace: Path = (workspace or Path.cwd() / "workspace").resolve()
         self._chat_history: list[dict] = []  # 多轮 chat 历史
+        self._ui_state: RunUiState = initial_ui_state()
+        self._worker: AgentWorker | None = None
         self._chat_system: str = (
             "你是 TraceForce Agent，一个软件工程任务的 coding agent。"
             "当前用户选择走纯对话模式（不带工具）。请用简洁中文回复，"
@@ -122,45 +143,117 @@ class CodingAgentApp(App):
     # ---------- Agent 模式 ----------
 
     async def run_agent(self, task: str) -> None:
-        """走完整工具循环（默认模式）。"""
-        output = self.query_one("#output", RichLog)
-        stats = self.query_one("#stats", Static)
+        """Start the AgentLoop worker; lifecycle messages drive the UI."""
+        if self._worker is not None and self._worker.is_alive:
+            return
+
+        from coding_agent.config import load_config
+
+        config = load_config()
+        config.workspace_root = self._workspace
         input_widget = self.query_one("#input", Input)
         input_widget.disabled = True
-        stats.update("[spinner]✻ working...[/spinner]")
+        self._ui_state = initial_ui_state()
+        self._worker = AgentWorker(
+            self,
+            task=task,
+            workspace=config.workspace_root,
+            config=config,
+        )
+        self._worker.start()
+        self.query_one("#stats", Static).update("[spinner]✻ working...[/spinner]")
 
-        try:
-            from coding_agent.config import load_config
-            from coding_agent.agent.loop import run as agent_run
+    def on_ui_agent_event(self, message: UiAgentEvent) -> None:
+        """Reduce one worker event on Textual's application thread."""
+        event = message.event
+        previous = self._ui_state
+        self._ui_state = reduce_event(previous, event)
+        if self._ui_state is previous:
+            return
+        self._render_agent_event(event)
+        self._render_stats()
 
-            config = load_config()
-            config.workspace_root = self._workspace
-
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: agent_run(
-                    task=task,
-                    workspace=config.workspace_root,
-                    config=config,
-                ),
+    def on_agent_worker_result(self, message: AgentWorkerResult) -> None:
+        """Keep the result as a fallback for adapters without terminal events."""
+        if not self._ui_state.terminal:
+            self.query_one("#stats", Static).update(
+                f"[dim_meta]{message.result.steps} steps · "
+                f"{message.result.total_tokens:,} tokens[/dim_meta]"
             )
+        self._finish_agent_input()
 
-            output.write(f"[success]✓ {result.summary}[/success]\n")
+    def on_agent_worker_error(self, message: AgentWorkerError) -> None:
+        """Surface an uncaught worker error without duplicating RunFailed."""
+        if not self._ui_state.terminal:
+            output = self.query_one("#output", RichLog)
+            output.write(f"[error]✗ Error: {escape(str(message.error))}[/error]\n\n")
+            self.query_one("#stats", Static).update("[error]error[/error]")
+        self._finish_agent_input()
+
+    def _render_agent_event(self, event: object) -> None:
+        """Render compact lifecycle text; widgets remain a later P2-1C card."""
+        output = self.query_one("#output", RichLog)
+        if isinstance(event, RunStarted):
+            output.write("[dim_meta]⏺ run started[/dim_meta]")
+        elif isinstance(event, TurnStarted):
+            output.write(f"[spinner]✻ turn {event.turn} · thinking[/spinner]")
+        elif isinstance(event, ModelStarted):
+            self.query_one("#stats", Static).update(
+                f"[spinner]✻ {escape(event.model or 'model')} · step {event.step}[/spinner]"
+            )
+        elif isinstance(event, ModelCompleted):
+            if event.response is not None and event.response.content.strip():
+                output.write(f"[agent_reply]{escape(event.response.content)}[/agent_reply]")
+        elif isinstance(event, ModelFailed):
+            output.write(f"[error]✗ model: {escape(event.error or event.error_type)}[/error]")
+        elif isinstance(event, ToolStarted):
+            output.write(f"[tool_call]● {escape(event.tool_name)}[/tool_call]")
+        elif isinstance(event, (ToolCompleted, ToolFailed)):
+            tool = (self._ui_state.tools or {}).get((event.run_id, event.action_id))
+            status = tool.status.value if tool is not None else "error"
+            summary = tool.summary if tool is not None else ""
+            output.write(f"[tool_output]⎿ {status}: {escape(summary or event.event_type)}[/tool_output]")
+        elif isinstance(event, ValidationCompleted):
+            label = "passed" if event.passed else "failed"
+            output.write(f"[{'success' if event.passed else 'error'}]validation {label}: "
+                         f"{escape(event.summary)}[/{'success' if event.passed else 'error'}]")
+        elif isinstance(event, FeedbackRecorded):
+            output.write(f"[dim_meta]feedback: {escape(event.content)}[/dim_meta]")
+        elif isinstance(event, FinishAccepted):
+            output.write(f"[success]✓ {escape(event.summary)}[/success]")
+        elif isinstance(event, RunFinished):
             output.write(
-                f"[dim_meta]  {result.steps} steps · "
-                f"{result.total_tokens:,} tokens · "
-                f"stop: {result.stop_reason}[/dim_meta]\n\n"
+                f"[dim_meta]{self._ui_state.step} steps · "
+                f"{self._ui_state.total_tokens:,} tokens · "
+                f"stop: {escape(self._ui_state.terminal_reason or event.reason)}[/dim_meta]\n\n"
             )
-            stats.update(
-                f"[dim_meta]{result.steps} steps · {result.total_tokens:,} tokens[/dim_meta]"
+            self._finish_agent_input()
+        elif isinstance(event, TurnEnded):
+            return
+        elif isinstance(event, RunFailed):
+            output.write(f"[error]✗ Error: {escape(event.error or event.error_type)}[/error]\n\n")
+            self._finish_agent_input()
+
+    def _render_stats(self) -> None:
+        """Update the footer from reducer state, not from worker callbacks."""
+        state = self._ui_state
+        if state.terminal:
+            label = "error" if state.phase == "error" else state.phase
+            self.query_one("#stats", Static).update(
+                f"[{'error' if state.phase == 'error' else 'dim_meta'}]"
+                f"{state.step} steps · {state.total_tokens:,} tokens · {label}[/"
+                f"{'error' if state.phase == 'error' else 'dim_meta'}]"
             )
-        except Exception as e:
-            output.write(f"[error]✗ Error: {e}[/error]\n\n")
-            stats.update("[error]error[/error]")
-        finally:
-            input_widget.disabled = False
-            input_widget.focus()
+        elif state.phase in {"thinking", "working", "validation", "feedback"}:
+            self.query_one("#stats", Static).update(
+                f"[spinner]✻ {state.phase} · step {state.step}[/spinner]"
+            )
+
+    def _finish_agent_input(self) -> None:
+        """Re-enable input after terminal worker delivery."""
+        input_widget = self.query_one("#input", Input)
+        input_widget.disabled = False
+        input_widget.focus()
 
     # ---------- Chat 模式（多轮） ----------
 
