@@ -243,18 +243,32 @@ def _run_loop(
 
             if action.is_invalid:
                 tool_list = ", ".join(registry.names())
-                feedback = (
-                    f"[InvalidAction] {action.error_msg}\n"
-                    f"Available tools: {tool_list}.\n"
-                    "You MUST respond with a valid tool call in your next message. "
-                    "Do not output plain text without a tool call."
-                )
+                # P2-1E.1: 协议级失败（截断 / 非法 JSON / 多调用）使用
+                # 不同的 feedback kind，便于 trajectory 和调试区分；但仍走
+                # [InvalidAction] 高优先级反馈路径，让模型看到明确的错误。
+                if action.is_protocol_failure:
+                    feedback = (
+                        f"[InvalidAction][ProtocolFailure] {action.error_msg}\n"
+                        "Your previous response was structurally invalid (truncated, "
+                        "malformed, or non-conformant to the tool-call protocol). "
+                        f"Available tools: {tool_list}. "
+                        "Re-emit a complete, valid response with at most one tool call."
+                    )
+                    feedback_kind = "protocol_failure"
+                else:
+                    feedback = (
+                        f"[InvalidAction] {action.error_msg}\n"
+                        f"Available tools: {tool_list}.\n"
+                        "You MUST respond with a valid tool call in your next message. "
+                        "Do not output plain text without a tool call."
+                    )
+                    feedback_kind = "invalid_action"
                 context_manager.record_feedback(feedback)
                 state.consecutive_errors += 1
                 events.emit(FeedbackRecorded(
                     run_id=run_id,
                     step=state.step_count,
-                    kind="invalid_action",
+                    kind=feedback_kind,
                     content=feedback,
                 ))
                 state.mark_step_done()

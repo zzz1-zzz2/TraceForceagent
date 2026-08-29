@@ -177,16 +177,21 @@ class ModelClient:
         for tc in (message.tool_calls or []):
             import json as _json
 
+            parse_error: str | None = None
             try:
                 args = _json.loads(tc.function.arguments)
-            except _json.JSONDecodeError:
+            except _json.JSONDecodeError as exc:
+                # P2-1E.1: 不再静默退化为 {}，保留错误诊断以便 parser
+                # 构造明确的协议失败（is_protocol_failure=True）。
                 args = {}
+                parse_error = str(exc)
             tool_calls.append(
                 ToolCall(
                     id=tc.id,
                     name=tc.function.name,
                     arguments=args,
                     raw_arguments=tc.function.arguments,
+                    arguments_parse_error=parse_error,
                 )
             )
 
