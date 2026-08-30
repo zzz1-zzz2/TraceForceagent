@@ -9,10 +9,10 @@ materials under `docs/archive/` are historical reference only.
 
 | State | Value |
 | --- | --- |
-| Current baseline | `main @ a52fca9` |
-| Test baseline | `437 passed` |
+| Current baseline | `main @ f7230f2` |
+| Test baseline | `450 passed` |
 | Current milestone | **MVP4 Visual Demo** |
-| Active card | MVP4.2 Model Streaming Core |
+| Active card | **MVP4.3 Streaming TUI** |
 | Target release | `v0.1.0-alpha.1` |
 | Platforms | Ubuntu 22.04 / 24.04, WSL2 — Python 3.11 / 3.12 |
 
@@ -56,12 +56,56 @@ materials under `docs/archive/` are historical reference only.
   responsive 60/80/120/160-column chrome, and compact tool surfaces.
 - Merged to `main` in PR #8; baseline is `main @ a52fca9` with `437 passed`.
 
+### MVP4.2 — Model Streaming Core ✅
+
+- Provider-neutral `ModelStreamDelta` fragments and a durable `ModelStreamAccumulator`.
+- Synchronous model compatibility remains explicit; streaming is enabled only by a
+  fully initialized streaming-capable client.
+- Durable `ModelCompleted` boundaries keep transient `ModelDelta` events out of
+  Trajectory persistence.
+- Merged to `main` in the MVP4.2 implementation line.
+
+### MVP4.2.1 — Streaming Boundary Hardening ✅
+
+- Model deltas carry incremental text only; the TUI accumulates drafts locally and
+  throttles visible assistant updates to approximately 40 ms.
+- Final model events replace the streaming draft without duplicate assistant text.
+- Cancellation is kept out of model/run failure classification.
+- Long-output, repeated-fragment, cancellation, bounded-Trajectory, and empty
+  non-Git Greenfield coverage are in the credential-free suite.
+- Greenfield Reality Gate completed: the real CLI check and direct TUI startup
+  were exercised in a fresh non-Git directory with no SDK request.
+
+### Greenfield Reality Gate
+
+Before starting MVP4.3, verify the actual CLI/TUI boundary from a clean
+checkout in a fresh empty directory:
+
+1. Record the commit, date, Linux platform, and Python version.
+2. Create a temporary directory with no files, no `.git`, and no workspace
+   `.env`; keep any explicit env file outside it.
+3. Run `coding-agent --version` and
+   `coding-agent --env-file <external-file> --provider openai check --workspace <empty-dir>`.
+   The command must resolve the selected provider, report the workspace as
+   usable, and make no model/SDK request.
+4. Launch `coding-agent --env-file <external-file> --provider openai tui
+   --workspace <empty-dir>` and confirm the welcome screen renders. Use a
+   detached `tmux` session when available; direct terminal startup is the
+   fallback when `tmux` is unavailable.
+5. Run the credential-free Greenfield E2E with its fake model. Confirm that
+   `apply_patch` creates a file, `python -m py_compile` is classified as
+   validation, `finish` is accepted, the final Trajectory has no
+   `model_delta`, and the directory remains non-Git with no generated `.env`.
+
+A real provider smoke is separate from this gate and must use a real key in
+an explicit env file. The workspace `.env` is never auto-loaded.
+
 ## Upcoming milestones
 
 | Milestone | State | User-visible outcome |
-| --- | --- | --- |
 | MVP4.1 Visual Foundation | ✅ | A calm, compact, recognizable TraceForce TUI at terminal widths from 60 to 160 columns. |
-| MVP4.2 Model Streaming Core | 🚧 | Assistant output can arrive incrementally through a typed streaming event contract. |
+| MVP4.2 Model Streaming Core | ✅ | Provider-neutral model streaming reconstructs complete responses behind a durable event boundary. |
+| MVP4.2.1 Streaming Boundary Hardening | ✅ | Streaming drafts render safely, cancellation remains truthful, and a fresh empty workspace passes the reality gate. |
 | MVP4.3 Streaming TUI | ⬜ | The TUI renders incremental assistant output without breaking transcript or terminal state. |
 | MVP4.4 Shell Streaming + Process Cancel | ⬜ | Shell output is visible while running and a process group can be cooperatively terminated. |
 | MVP4.5 Final Visual Polish | ⬜ | Status transitions, tool surfaces, and welcome treatment are visually consistent. |
@@ -236,4 +280,6 @@ These remain deliberately outside the current MVP4 cards:
   `432 passed`.
 - **MVP4.1** — visual foundation specification frozen and shipped in PR #8;
   `main @ a52fca9`, `437 passed`.
-- **MVP4.2** — model streaming core is the active card; implementation in progress.
+- **MVP4.2** — model streaming core shipped on `main`; durable completion boundaries are established.
+- **MVP4.2.1** — streaming boundary hardening and the Greenfield Reality Gate are complete; MVP4.3 is next.
+- **TUI configuration forwarding** — global `--env-file` and `--provider` now reach both TUI preflight paths and the worker configuration.

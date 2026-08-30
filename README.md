@@ -17,8 +17,8 @@
 - **P2-1E.3 WorkspaceChangeTracker** for real mutation detection (replaces tool-name guessing).
 - **P2-1E.1 ModelResponseGuard** that rejects truncated responses, multi-tool calls, malformed JSON, and content-filtered outputs *before* dispatching a tool.
 - **P2-1D Provider Profile** + user-level `~/.config/traceforce/config.toml` (non-sensitive allow-list) and a unified preflight that flags missing provider/key/workspace without leaking secrets.
-- A Textual TUI with `Tool` and `Notice` widgets, `post_message()` Pilot-tested, fixed chrome at 60/80/120 cols.
-- A 7-task benchmark harness (`benchmarks/tasks/A_* … F_*`) and 316+ unit/integration tests, all credential-free.
+- A Textual TUI with `Tool`, `Notice`, and incrementally rendered assistant output, `post_message()` Pilot-tested, fixed chrome at 60/80/120/160 cols.
+- A 7-task benchmark harness (`benchmarks/tasks/A_* … F_*`) and 450+ unit/integration tests, all credential-free.
 
 If any of the above stops being true, file an issue — this section is the source of truth.
 
@@ -150,7 +150,20 @@ make test            # → pytest, credential-free, no network
 make lint            # → ruff
 ```
 
-For an end-to-end smoke that actually talks to a model, supply a real key in `--env-file` and run a `benchmarks/tasks/A_safe_divide` task:
+For the credential-free Greenfield Reality Gate, use a clean checkout and a fresh, non-Git directory. Keep the credential file outside the target workspace; the workspace's own `.env` is ignored deliberately:
+
+```bash
+empty_dir=$(mktemp -d)
+env_file=$(mktemp)
+printf 'OPENAI_API_KEY=gate-placeholder\n' > "$env_file"
+coding-agent --version
+coding-agent --env-file "$env_file" --provider openai check --workspace "$empty_dir"
+coding-agent --env-file "$env_file" --provider openai tui --workspace "$empty_dir"
+```
+
+The startup check must show the provider, model, workspace, Git, and optional ripgrep checks without making an SDK request. For a no-network run, use the credential-free test suite (the Greenfield E2E injects a fake model), then confirm that the empty directory has no `.git` or generated `.env` and that its trajectory contains durable lifecycle/tool/validation events but no `model_delta`. In an environment without `tmux`, launch the TUI directly and capture the rendered welcome screen; otherwise use the tmux procedure documented by your terminal tooling.
+
+Record the commit, date, platform, Python version, and test result when running this gate. A real model smoke is separate and requires an actual key in an explicit external `--env-file`:
 
 ```bash
 coding-agent --env-file ~/traceforce.env run --task-file benchmarks/tasks/A_safe_divide/task.md \

@@ -111,6 +111,67 @@ def test_config_show_prints_redacted_view(
     assert "sk-very-secret" not in result.stdout
 
 
+def test_tui_forwards_global_config_options(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "traceforce.env"
+    env_file.write_text("OPENAI_API_KEY=test-key\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    captured: dict[str, object] = {}
+
+    class FakeApp:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run(self) -> None:
+            captured["ran"] = True
+
+    import coding_agent.tui.app
+
+    monkeypatch.setattr(coding_agent.tui.app, "CodingAgentApp", FakeApp)
+    result = runner.invoke(
+        app,
+        [
+            "--env-file",
+            str(env_file),
+            "--provider",
+            "openai",
+            "tui",
+            "--workspace",
+            str(workspace),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert captured == {
+        "workspace": workspace,
+        "env_file": env_file,
+        "provider": "openai",
+        "ran": True,
+    }
+
+
+def test_tui_defaults_global_config_options_to_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeApp:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run(self) -> None:
+            pass
+
+    import coding_agent.tui.app
+
+    monkeypatch.setattr(coding_agent.tui.app, "CodingAgentApp", FakeApp)
+    result = runner.invoke(app, ["tui", "--workspace", str(tmp_path)])
+
+    assert result.exit_code == 0, result.stdout
+    assert captured == {"workspace": tmp_path, "env_file": None, "provider": None}
+
+
 def test_run_requires_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without a key, ``run`` exits non-zero with a clean message."""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)

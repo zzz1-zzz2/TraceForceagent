@@ -36,7 +36,6 @@ from coding_agent import __version__
 from coding_agent.config import (
     PROVIDER_IDS,
     AgentConfig,
-    default_user_config_path,
     load_config,
     run_preflight,
 )
@@ -251,7 +250,13 @@ def tui(
     """Launch the Textual TUI."""
     from coding_agent.tui.app import CodingAgentApp
 
-    CodingAgentApp(workspace=workspace).run()
+    env_file: Path | None = ctx.obj.get("env_file") if ctx.obj else None
+    provider: str | None = ctx.obj.get("provider") if ctx.obj else None
+    CodingAgentApp(
+        workspace=workspace,
+        env_file=env_file,
+        provider=provider,
+    ).run()
 
 
 @app.command()

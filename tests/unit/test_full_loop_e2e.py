@@ -222,6 +222,8 @@ class TestGreenfieldSmoke:
 
         assert result.stop_reason == "finish"
         assert (workspace / "hello.py").exists()
+        assert not (workspace / ".git").exists()
+        assert not (workspace / ".env").exists()
         assert fake.call_count == 3
         assert result.final_state is not None
         assert result.final_state.status == "COMPLETED"

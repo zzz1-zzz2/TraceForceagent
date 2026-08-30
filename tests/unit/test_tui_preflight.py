@@ -59,6 +59,60 @@ async def test_mount_runs_preflight_and_appends_notice_when_tool_missing(
 
 
 @pytest.mark.asyncio
+async def test_tui_uses_explicit_env_file_and_provider_for_mount_and_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "traceforce.env"
+    env_file.write_text("OPENAI_API_KEY=from-file\n", encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("TRACEFORCE_API_KEY", raising=False)
+
+    captured: list[tuple[Path | None, str | None]] = []
+    real_load_config = __import__("coding_agent.tui.app", fromlist=["load_config"]).load_config
+
+    def load_config_spy(*, env_file=None, provider=None):
+        captured.append((env_file, provider))
+        return real_load_config(env_file=env_file, provider=provider)
+
+    monkeypatch.setattr("coding_agent.tui.app.load_config", load_config_spy)
+
+    class WorkerStub:
+        def __init__(self, owner, *, config, **kwargs):
+            self.config = config
+            self.started = False
+            self.is_alive = False
+
+        def start(self):
+            self.started = True
+
+    workers: list[WorkerStub] = []
+
+    def worker_factory(*args, **kwargs):
+        worker = WorkerStub(*args, **kwargs)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr("coding_agent.tui.app.AgentWorker", worker_factory)
+    app_ = CodingAgentApp(
+        workspace=tmp_path,
+        env_file=env_file,
+        provider="openai",
+    )
+    async with app_.run_test() as pilot:
+        await pilot.pause()
+        await app_.run_agent("create a project from scratch")
+        await pilot.pause()
+
+    assert captured[0] == (env_file, "openai")
+    assert captured[1] == (env_file, "openai")
+    assert len(workers) == 1
+    assert workers[0].config.api_key == "from-file"
+    assert workers[0].started
+    assert app_._worker is workers[0]  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_run_agent_does_not_start_worker_when_credentials_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

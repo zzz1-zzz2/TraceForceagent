@@ -67,9 +67,17 @@ class CodingAgentApp(App):
     SUB_TITLE = f"v{__version__}"
     CANCEL_EXIT_GUARD_SECONDS = 0.4
 
-    def __init__(self, workspace: Path | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path | None = None,
+        *,
+        env_file: Path | None = None,
+        provider: str | None = None,
+    ) -> None:
         super().__init__()
         self._workspace: Path = (workspace or Path.cwd()).resolve()
+        self._env_file = env_file
+        self._provider = provider
         self._session: AgentSession = AgentSession(workspace=self._workspace)
         self._ui_state: RunUiState = initial_ui_state()
         self._worker: AgentWorker | None = None
@@ -107,7 +115,10 @@ class CodingAgentApp(App):
         :meth:`run_agent`.
         """
         try:
-            config = load_config()
+            config = load_config(
+                env_file=self._env_file,
+                provider=self._provider,
+            )
         except Exception as exc:  # noqa: BLE001 - surface redacted message
             await self._append(
                 NoticeWidget(f"config load failed: {exc}", level="error")
@@ -266,7 +277,10 @@ class CodingAgentApp(App):
             await self._append(NoticeWidget("当前任务仍在运行；追加指令将在 Session 阶段开放", level="system"))
             return
 
-        config = load_config()
+        config = load_config(
+            env_file=self._env_file,
+            provider=self._provider,
+        )
         config.workspace_root = self._workspace
 
         # Hard preflight gate: never spin up a worker with a broken setup.
