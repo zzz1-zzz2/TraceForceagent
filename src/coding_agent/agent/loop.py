@@ -30,8 +30,10 @@ from coding_agent.events import (
     RunFinished,
     RunStarted,
     RunStateSnapshot,
+    ToolCancelled,
     ToolCompleted,
     ToolFailed,
+    ToolOutputDelta,
     ToolResultSnapshot,
     ToolStarted,
     TurnEnded,
@@ -43,6 +45,7 @@ from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
 from coding_agent.model.streaming import ModelStreamAccumulator, ModelStreamDelta
 from coding_agent.model.types import AgentAction, AssistantReplyAction, FinishAction, ToolResult
 from coding_agent.recovery.failure_refresh import FailureAwareRefresher
+from coding_agent.runtime.base import RuntimeOutputChunk, ToolExecutionContext
 from coding_agent.runtime.local import LocalRuntime
 from coding_agent.session import AgentSession, PreviousRunSnapshot
 from coding_agent.tools.registry import default_registry
@@ -621,6 +624,30 @@ def _run_loop(
             # search_code 等只读工具理论上不会触发变化，但 cheap 防御性
             # 保留 snapshot 仍然正确。
             prev_snapshot = workspace_tracker.snapshot()
+
+            def _on_output(
+                chunk: RuntimeOutputChunk,
+                _run_id: str = run_id,
+                _turn: int = turn_number,
+                _step: int = tool_step,
+                _tool_name: str = action.tool_name,
+                _action_id: str = action.action_id,
+            ) -> None:
+                events.emit(ToolOutputDelta(
+                    run_id=_run_id,
+                    turn=_turn,
+                    step=_step,
+                    tool_name=_tool_name,
+                    action_id=_action_id,
+                    text=chunk.text,
+                    chunk_index=chunk.chunk_index,
+                    stream=chunk.stream,
+                ))
+
+            execution_context = ToolExecutionContext(
+                cancellation_token=token,
+                on_output=_on_output,
+            )
             if tool is None:
                 observation = ToolResult.fail(
                     f"Unknown tool: '{action.tool_name}'. Available tools: {', '.join(registry.names())}",
@@ -629,7 +656,12 @@ def _run_loop(
                 state.consecutive_errors += 1
             else:
                 try:
-                    observation = tool.execute(action.arguments, runtime)
+                    if action.tool_name == "run_command":
+                        observation = tool.execute(
+                            action.arguments, runtime, context=execution_context
+                        )
+                    else:
+                        observation = tool.execute(action.arguments, runtime)
                     observation = failure_refresher.maybe_refresh(state, observation)
                     if observation.success:
                         state.consecutive_errors = 0
@@ -695,7 +727,28 @@ def _run_loop(
                 state.recent_validation = observation.summary
 
             result_snapshot = ToolResultSnapshot.from_result(observation)
-            if tool_exception is not None or observation.is_runtime_error:
+            terminal_emitted = False
+            if action.tool_name == "run_command" and observation.is_timeout:
+                # Timeout or cooperative cancellation: emit ``ToolCancelled``
+                # as the authoritative durable boundary so observers do not
+                # treat a stopped-by-user/cancelled-by-deadline tool as a
+                # generic runtime failure. ``is_runtime_error`` may also be
+                # True in this state (LocalRuntime marks cancelled exits as
+                # runtime errors), so this branch must precede the generic
+                # failure branch.
+                events.emit(ToolCancelled(
+                    run_id=run_id,
+                    turn=turn_number,
+                    step=tool_step,
+                    tool_name=action.tool_name,
+                    action_id=action.action_id,
+                    arguments=action.arguments,
+                    args_hash=action.args_hash,
+                    result=result_snapshot,
+                    reason=observation.error or "cancelled",
+                ))
+                terminal_emitted = True
+            elif tool_exception is not None or observation.is_runtime_error:
                 events.emit(ToolFailed(
                     run_id=run_id,
                     turn=turn_number,
@@ -708,7 +761,8 @@ def _run_loop(
                     error=observation.error or observation.content,
                     result=result_snapshot,
                 ))
-            else:
+                terminal_emitted = True
+            if not terminal_emitted:
                 events.emit(ToolCompleted(
                     run_id=run_id,
                     turn=turn_number,
@@ -762,7 +816,7 @@ def _run_loop(
                         run_id=run_id,
                     )
                 try:
-                    events.emit(ToolCompleted(
+                    events.emit(ToolCancelled(
                         run_id=run_id,
                         turn=turn_number,
                         step=active_tool_step,
@@ -772,6 +826,7 @@ def _run_loop(
                         args_hash=active_action.args_hash,
                         result=ToolResultSnapshot.from_result(active_observation)
                         if active_observation else None,
+                        reason="cancelled",
                     ))
                 except Exception:
                     pass

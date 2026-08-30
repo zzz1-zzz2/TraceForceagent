@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 from coding_agent.model.types import ToolResult
-from coding_agent.runtime.base import Runtime
+from coding_agent.runtime.base import Runtime, ToolExecutionContext
 from coding_agent.tools.base import Tool
 
 
@@ -49,7 +49,7 @@ class SearchCodeTool(Tool):
         "required": ["query"],
     }
 
-    def execute(self, args: dict, runtime: Runtime) -> ToolResult:
+    def execute(self, args: dict, runtime: Runtime, context: ToolExecutionContext | None = None) -> ToolResult:
         if not shutil.which("rg"):
             return ToolResult.fail(
                 "ripgrep (rg) not installed. Run: sudo apt install ripgrep",

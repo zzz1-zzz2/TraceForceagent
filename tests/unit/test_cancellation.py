@@ -124,7 +124,7 @@ def test_cancel_after_tool_return_pairs_session_facts(tmp_path: Path, monkeypatc
     monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: ToolModel()))
     original_execute = ListFilesTool.execute
 
-    def execute_then_cancel(self, args, runtime):
+    def execute_then_cancel(self, args, runtime, context=None):
         result = original_execute(self, args, runtime)
         token.cancel()
         return result
@@ -163,7 +163,7 @@ def test_cancel_after_validation_classification_preserves_validation_fact(
 
     monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: ToolModel()))
 
-    def execute_then_cancel(self, args, runtime):
+    def execute_then_cancel(self, args, runtime, context=None):
         result = ToolResult.ok(
             "$ python -m pytest -q\n\n1 passed",
             summary="Command OK (0.0s)",

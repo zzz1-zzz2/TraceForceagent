@@ -180,7 +180,8 @@ class ToolExecutionWidget(Vertical):
         an expanded card stays expanded as new tool results stream in.
         ``_can_expand`` is re-derived from the latest presentation so that
         ``toggle_expanded`` and the ``can_expand`` class toggle correctly
-        reflect the new content.
+        reflect the new content. Draft streaming is rendered live without
+        rewriting the tool widget identity.
         """
         self.state = state
         self._can_expand = present_tool(state).can_expand

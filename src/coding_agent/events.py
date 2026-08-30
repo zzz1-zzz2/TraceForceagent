@@ -372,6 +372,54 @@ class ToolFailed(BaseEvent):
             object.__setattr__(self, "result", ToolResultSnapshot.from_result(self.result))
 
 
+@dataclass(frozen=True, kw_only=True)
+class ToolCancelled(BaseEvent):
+    """Published when an in-flight tool execution was cancelled cooperatively.
+
+    Carries the bounded partial result so the reducer and Trajectory both
+    observe the same durable fact: a tool stopped because of cancellation,
+    not because of a runtime or validation error.
+    """
+
+    event_type: ClassVar[str] = "tool_cancelled"
+    turn: int = 0
+    step: int = 0
+    tool_name: str = ""
+    action_id: str = ""
+    arguments: Mapping[str, ImmutableValue] | None = None
+    args_hash: str = ""
+    result: ToolResultSnapshot | None = None
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.arguments is not None:
+            object.__setattr__(self, "arguments", _freeze_arguments(self.arguments))
+        if self.result is not None:
+            object.__setattr__(self, "result", ToolResultSnapshot.from_result(self.result))
+
+
+@dataclass(frozen=True, kw_only=True)
+class ToolOutputDelta(BaseEvent):
+    """Transient increment emitted while a tool execution is streaming.
+
+    ``text`` is only the new fragment from this event; observers must
+    accumulate it locally keyed by ``(run_id, action_id)``. Tool output
+    deltas are observable UI facts, not session history; the complete
+    bounded output remains the durable boundary represented by
+    :class:`ToolCompleted`, :class:`ToolFailed`, or :class:`ToolCancelled`.
+    """
+
+    event_type: ClassVar[str] = "tool_output_delta"
+    turn: int = 0
+    step: int = 0
+    tool_name: str = ""
+    action_id: str = ""
+    text: str = ""
+    chunk_index: int = 0
+    stream: str = "combined"
+
+
 AgentEvent: TypeAlias = (
     RunStarted
     | RunFinished
@@ -388,8 +436,10 @@ AgentEvent: TypeAlias = (
     | ModelCompleted
     | ModelFailed
     | ToolStarted
+    | ToolOutputDelta
     | ToolCompleted
     | ToolFailed
+    | ToolCancelled
 )
 
 __all__ = [
@@ -409,8 +459,10 @@ __all__ = [
     "RunStarted",
     "RunStateSnapshot",
     "ToolCallSnapshot",
+    "ToolCancelled",
     "ToolCompleted",
     "ToolFailed",
+    "ToolOutputDelta",
     "ToolResultSnapshot",
     "ToolStarted",
     "TurnEnded",

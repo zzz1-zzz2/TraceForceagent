@@ -9,10 +9,10 @@ materials under `docs/archive/` are historical reference only.
 
 | State | Value |
 | --- | --- |
-| Current baseline | `main @ f7230f2` |
-| Test baseline | `450 passed` |
+| Current baseline | `main @ 581c64c` |
+| Test baseline | `473 passed` |
 | Current milestone | **MVP4 Visual Demo** |
-| Active card | **MVP4.3 Streaming TUI** |
+| Active card | **MVP4.4 Tool Output Streaming** |
 | Target release | `v0.1.0-alpha.1` |
 | Platforms | Ubuntu 22.04 / 24.04, WSL2 — Python 3.11 / 3.12 |
 
@@ -76,6 +76,51 @@ materials under `docs/archive/` are historical reference only.
 - Greenfield Reality Gate completed: the real CLI check and direct TUI startup
   were exercised in a fresh non-Git directory with no SDK request.
 
+### MVP4.3 — Streaming TUI ✅
+
+- Worker identity gate rejects stale `UiAgentEvent`s before the reducer runs;
+  terminal lifecycle events also gate on `worker_id` so a late completion
+  cannot re-enable composer input or duplicate the final card.
+- Keyed `(run_id, turn)` assistant draft and message state replaces the global
+  draft without leaking into other turns; `assistant_messages` order is
+  preserved on interleaved updates.
+- `ModelCompleted` / `AssistantReplied` flush pending renders once, set the
+  final content exactly once, and leave the assistant card in place; foreign
+  runs, duplicate sequences, and stale turns are dropped by the reducer.
+- Integration coverage exercises the real worker thread, reducer, timer
+  flush, terminal ordering, cancellation, and the second-run fresh state
+  case without SDK/network calls.
+
+### MVP4.4 — Tool Output Streaming + Process Cancel ✅
+
+- `ToolOutputDelta` and `ToolCancelled` events join the lifecycle contract;
+  `is_transient_event()` unifies them with `ModelDelta` so Trajectory and
+  Session history remain bounded at durable boundaries.
+- Runtime ↔ AgentLoop dependency direction is preserved via
+  `RuntimeOutputChunk` and `ToolExecutionContext`; the Runtime never depends
+  on AgentEvent / EventEmitter.
+- `LocalRuntime` now uses `subprocess.Popen` with a drained background
+  reader, a cancellation watcher, `start_new_session=True`, and a
+  process-group SIGTERM → SIGKILL escalation. `RuntimeResult.cancelled`
+  is the authoritative durable boundary.
+- The AgentLoop emits the exact `ToolStarted → ToolOutputDelta × N →
+  ToolCancelled → RunCancelled` ordering for cancelled `run_command` tools,
+  and `ToolCancelled` precedes the generic `ToolFailed` branch when a
+  cancelled command reports `is_runtime_error=True` alongside
+  `is_timeout=True`.
+- The TUI reducer and presenter accumulate streamed output in
+  `ToolUiState.draft`, clear it on terminal events, and keep the bounded
+  preview visible without growing without bound.
+- The TUI `on_ui_agent_event` worker-identity gate is extended to
+  `ToolOutputDelta`, so a stale worker can never corrupt the active card.
+- The credential-free suite gains 18 new MVP4.4-5 acceptance cases:
+  chunk ordering, repeated-fragment preservation, high-frequency throttling,
+  bounded preview, Trajectory `tool_output_delta` exclusion, durable
+  `ToolCompleted` content, timeout and cancellation process-group
+  termination, cancellation ordering, session call/result pairing, late
+  worker-delta rejection, terminal in-place widget update, narrow-width
+  layout stability, and non-shell tool zero-regression.
+
 ### Greenfield Reality Gate
 
 Before starting MVP4.3, verify the actual CLI/TUI boundary from a clean
@@ -106,8 +151,8 @@ an explicit env file. The workspace `.env` is never auto-loaded.
 | MVP4.1 Visual Foundation | ✅ | A calm, compact, recognizable TraceForce TUI at terminal widths from 60 to 160 columns. |
 | MVP4.2 Model Streaming Core | ✅ | Provider-neutral model streaming reconstructs complete responses behind a durable event boundary. |
 | MVP4.2.1 Streaming Boundary Hardening | ✅ | Streaming drafts render safely, cancellation remains truthful, and a fresh empty workspace passes the reality gate. |
-| MVP4.3 Streaming TUI | ⬜ | The TUI renders incremental assistant output without breaking transcript or terminal state. |
-| MVP4.4 Shell Streaming + Process Cancel | ⬜ | Shell output is visible while running and a process group can be cooperatively terminated. |
+| MVP4.3 Streaming TUI | ✅ | The TUI renders incremental assistant output without breaking transcript or terminal state. |
+| MVP4.4 Tool Output Streaming | ✅ | Shell output is visible while running and the whole process group can be cooperatively terminated. |
 | MVP4.5 Final Visual Polish | ⬜ | Status transitions, tool surfaces, and welcome treatment are visually consistent. |
 | MVP4.6 Demo Rehearsal | ⬜ | A repeatable alpha demo script exercises the product's strongest user journey. |
 
@@ -283,3 +328,5 @@ These remain deliberately outside the current MVP4 cards:
 - **MVP4.2** — model streaming core shipped on `main`; durable completion boundaries are established.
 - **MVP4.2.1** — streaming boundary hardening and the Greenfield Reality Gate are complete; MVP4.3 is next.
 - **TUI configuration forwarding** — global `--env-file` and `--provider` now reach both TUI preflight paths and the worker configuration.
+- **MVP4.3** — worker identity gate, keyed assistant draft, terminal flush paths, and the real worker→Textual integration coverage are merged on `main`.
+- **MVP4.4** — tool-output streaming, `ToolOutputDelta`/`ToolCancelled` lifecycle, runtime/loop decoupling via `RuntimeOutputChunk` + `ToolExecutionContext`, and process-group SIGTERM→SIGKILL termination are merged on `main`; baseline `main @ 581c64c + MVP4.4`, `473 passed`.

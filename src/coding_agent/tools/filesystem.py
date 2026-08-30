@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 from coding_agent.model.types import ToolResult
-from coding_agent.runtime.base import Runtime
+from coding_agent.runtime.base import Runtime, ToolExecutionContext
 from coding_agent.tools.base import Tool
 
 
@@ -69,7 +69,7 @@ class ListFilesTool(_FileSystemToolBase):
         "required": [],
     }
 
-    def execute(self, args: dict, runtime: Runtime) -> ToolResult:
+    def execute(self, args: dict, runtime: Runtime, context: ToolExecutionContext | None = None) -> ToolResult:
         path_str = args.get("path", ".")
         max_depth = min(args.get("max_depth", 3), 10)
         max_entries = min(args.get("max_entries", 200), 1000)
@@ -163,7 +163,7 @@ class ReadFileTool(_FileSystemToolBase):
 
     DEFAULT_WINDOW = 200
 
-    def execute(self, args: dict, runtime: Runtime) -> ToolResult:
+    def execute(self, args: dict, runtime: Runtime, context: ToolExecutionContext | None = None) -> ToolResult:
         path_str = args.get("path", "")
         if not path_str:
             return ToolResult.fail("Missing required parameter: path")

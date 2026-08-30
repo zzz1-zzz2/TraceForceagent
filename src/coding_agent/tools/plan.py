@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from coding_agent.model.types import ToolResult
-from coding_agent.runtime.base import Runtime
+from coding_agent.runtime.base import Runtime, ToolExecutionContext
 from coding_agent.tools.base import Tool
 
 
@@ -41,7 +41,7 @@ class UpdatePlanTool(Tool):
         "required": ["items"],
     }
 
-    def execute(self, args: dict, runtime: Runtime) -> ToolResult:
+    def execute(self, args: dict, runtime: Runtime, context: ToolExecutionContext | None = None) -> ToolResult:
         items = args.get("items", [])
         if not isinstance(items, list):
             return ToolResult.fail("items must be a list")

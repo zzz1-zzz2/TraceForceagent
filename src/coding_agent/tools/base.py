@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     # TYPE_CHECKING 块只在静态分析时执行，避免 tools ↔ model 包循环导入。
     # 运行时通过函数内 lazy import 使用 ToolResult。
     from coding_agent.model.types import ToolResult
+    from coding_agent.runtime.base import ToolExecutionContext
 
 
 class Tool(ABC):
@@ -29,8 +30,17 @@ class Tool(ABC):
     schema: dict = {}
 
     @abstractmethod
-    def execute(self, args: dict, runtime) -> "ToolResult":
-        """执行工具，返回结果。"""
+    def execute(
+        self,
+        args: dict,
+        runtime,
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        """执行工具，返回结果。
+
+        默认实现：把 ``context`` 当作 no-op；子类（尤其是 ``run_command``）可
+        以接收 ``ToolExecutionContext`` 并向其 ``on_output`` 回调推送流式片段。
+        """
         raise NotImplementedError
 
     def validate_args(self, args: dict) -> list[str]:
@@ -80,12 +90,12 @@ class Tool(ABC):
             return isinstance(value, dict)
         return True  # unknown type: pass
 
-    def unknown_tool_observation(self, tool_name: str) -> "ToolResult":
+    def unknown_tool_observation(self, tool_name: str) -> ToolResult:
         """默认的 unknown tool Observation（子类一般不用改）。"""
         from coding_agent.model.types import ToolResult
         return ToolResult.fail(f"Unknown tool: {tool_name}")
 
-    def exception_observation(self, e: Exception) -> "ToolResult":
+    def exception_observation(self, e: Exception) -> ToolResult:
         """异常时返回 Observation（子类可定制更友好的错误信息）。"""
         from coding_agent.model.types import ToolResult
         return ToolResult.fail(

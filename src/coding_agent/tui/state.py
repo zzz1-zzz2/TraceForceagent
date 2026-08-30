@@ -25,8 +25,10 @@ from coding_agent.events import (
     RunFailed,
     RunFinished,
     RunStarted,
+    ToolCancelled,
     ToolCompleted,
     ToolFailed,
+    ToolOutputDelta,
     ToolStarted,
     TurnEnded,
     TurnStarted,
@@ -60,11 +62,15 @@ class ToolUiState:
     status: ToolUiStatus = ToolUiStatus.RUNNING
     success: bool | None = None
     content: str = ""
+    draft: str = ""
     error: str = ""
     summary: str = ""
     truncated: bool = False
     is_validation_failure: bool = False
     is_runtime_error: bool = False
+    is_timeout: bool = False
+    is_cancelled: bool = False
+    chunk_index: int = 0
     sequence_started: int = 0
     sequence_completed: int = 0
 
@@ -300,8 +306,55 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
         )
         return replace(state, phase="working", turn=event.turn, step=event.step, tools=tools)
 
+    if isinstance(event, ToolOutputDelta):
+        key = (event.run_id, event.action_id)
+        if not event.text:
+            return state
+        tools = dict(state.tools)
+        previous = tools.get(key)
+        if previous is None:
+            return state
+        updated = replace(
+            previous,
+            draft=previous.draft + event.text,
+            chunk_index=event.chunk_index,
+            turn=event.turn,
+            step=event.step,
+            status=ToolUiStatus.RUNNING,
+        )
+        tools[key] = updated
+        return replace(state, phase="working", turn=event.turn, step=event.step, tools=tools)
+
     if isinstance(event, (ToolCompleted, ToolFailed)):
         return _reduce_tool_terminal(state, event)
+
+    if isinstance(event, ToolCancelled):
+        key = (event.run_id, event.action_id)
+        tools = dict(state.tools)
+        previous = tools.get(key)
+        result = event.result
+        content = result.content if result is not None else ""
+        tools[key] = ToolUiState(
+            run_id=event.run_id,
+            action_id=event.action_id,
+            tool_name=event.tool_name or (previous.tool_name if previous else ""),
+            arguments=_copy_arguments(event.arguments or (previous.arguments if previous else {})),
+            turn=event.turn,
+            step=event.step,
+            status=ToolUiStatus.CANCELLED,
+            success=False,
+            content=content,
+            draft="",
+            error=(result.error if result is not None else event.reason) or "cancelled",
+            summary=(result.summary if result is not None else "") or event.reason,
+            truncated=result.truncated if result is not None else False,
+            is_runtime_error=True,
+            is_timeout=True,
+            is_cancelled=True,
+            sequence_started=previous.sequence_started if previous else 0,
+            sequence_completed=event.sequence,
+        )
+        return replace(state, phase="working", turn=event.turn, step=event.step, tools=tools)
 
     if isinstance(event, ValidationCompleted):
         validation = ValidationUiState(
@@ -492,6 +545,7 @@ def _reduce_tool_terminal(
         if isinstance(event, ToolFailed)
         else (result.error if result is not None else "")
     )
+    content = result.content if result is not None else (previous.draft if previous else "")
     tools[key] = ToolUiState(
         run_id=event.run_id,
         action_id=event.action_id,
@@ -501,12 +555,16 @@ def _reduce_tool_terminal(
         step=event.step,
         status=status,
         success=success,
-        content=result.content if result is not None else "",
+        content=content,
+        draft="",
         error=error,
         summary=result.summary if result is not None else "",
-        truncated=result.truncated if result is not None else False,
+        truncated=result.truncated if result is not None else (
+            previous.truncated if previous else False
+        ),
         is_validation_failure=result.is_validation_failure if result is not None else False,
         is_runtime_error=result.is_runtime_error if result is not None else False,
+        is_timeout=result.is_timeout if result is not None else False,
         sequence_started=previous.sequence_started if previous else 0,
         sequence_completed=event.sequence,
     )

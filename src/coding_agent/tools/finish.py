@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from coding_agent.model.types import ToolResult
-from coding_agent.runtime.base import Runtime
+from coding_agent.runtime.base import Runtime, ToolExecutionContext
 from coding_agent.tools.base import Tool
 
 
@@ -41,7 +41,7 @@ class FinishTool(Tool):
         "required": ["summary"],
     }
 
-    def execute(self, args: dict, runtime: Runtime) -> ToolResult:
+    def execute(self, args: dict, runtime: Runtime, context: ToolExecutionContext | None = None) -> ToolResult:
         # finish tool 不真正"执行"，只是触发 AgentLoop 的 finish 处理
         # 实际 finish 逻辑在 AgentLoop.run() 里
         summary = args.get("summary", "")

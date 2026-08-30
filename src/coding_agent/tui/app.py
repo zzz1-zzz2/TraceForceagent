@@ -24,8 +24,10 @@ from coding_agent.events import (
     RunFailed,
     RunFinished,
     RunStarted,
+    ToolCancelled,
     ToolCompleted,
     ToolFailed,
+    ToolOutputDelta,
     ToolStarted,
     TurnEnded,
     TurnStarted,
@@ -319,6 +321,11 @@ class CodingAgentApp(App):
 
     async def on_ui_agent_event(self, message: UiAgentEvent) -> None:
         """Reduce an event on the app thread, then update only its widgets."""
+        if (
+            message.worker_id is not None
+            and message.worker_id != self._active_worker_id()
+        ):
+            return
         event = message.event
         previous = self._ui_state
         next_state = reduce_event(previous, event)
@@ -370,6 +377,18 @@ class CodingAgentApp(App):
             else:
                 if assistant_widget.content != event.text:
                     assistant_widget.set_content(event.text)
+        elif isinstance(event, ToolOutputDelta):
+            tool_key = (event.run_id, event.action_id)
+            tool_state = self._ui_state.tools.get(tool_key)
+            if tool_state is None:
+                return
+            tool_widget = self._tool_widgets.get(tool_key)
+            if tool_widget is None:
+                tool_widget = ToolExecutionWidget(tool_state)
+                self._tool_widgets[tool_key] = tool_widget
+                await self._append(tool_widget)
+            else:
+                tool_widget.apply_state(tool_state)
         elif isinstance(event, ToolStarted):
             tool_key = (event.run_id, event.action_id)
             tool_state = self._ui_state.tools.get(tool_key)
@@ -382,7 +401,7 @@ class CodingAgentApp(App):
                 await self._append(tool_widget)
             else:
                 tool_widget.apply_state(tool_state)
-        elif isinstance(event, (ToolCompleted, ToolFailed)):
+        elif isinstance(event, (ToolCompleted, ToolFailed, ToolCancelled)):
             tool_key = (event.run_id, event.action_id)
             tool_state = self._ui_state.tools.get(tool_key)
             if tool_state is None:

@@ -7,10 +7,22 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from coding_agent.events import AgentEvent, ModelDelta
+from coding_agent.events import AgentEvent, ToolOutputDelta
 from coding_agent.trajectory.logger import TrajectoryLogger
 
 SCHEMA_VERSION = 2
+
+
+def is_transient_event(event: AgentEvent) -> bool:
+    """Return True when ``event`` is a transient UI fact, not a durable boundary.
+
+    Transient events (model deltas, tool output deltas) are observable to
+    subscribers such as the TUI and collectors but are intentionally
+    excluded from on-disk Trajectory and Session persistence. The matching
+    durable boundary (``ModelCompleted`` / ``ToolCompleted`` / ``ToolFailed``
+    / ``ToolCancelled``) replaces the stream rather than appending to it.
+    """
+    return isinstance(event, ToolOutputDelta) or event.event_type == "model_delta"
 
 
 class TrajectorySerializationError(TypeError):
@@ -139,7 +151,7 @@ class TrajectoryEventSink:
         return self.logger.path
 
     def __call__(self, event: AgentEvent) -> None:
-        if isinstance(event, ModelDelta):
+        if is_transient_event(event):
             return
         record = event_to_record(event)
         self.logger.write_record(record)
@@ -153,4 +165,5 @@ __all__ = [
     "TrajectoryEventSink",
     "TrajectorySerializationError",
     "event_to_record",
+    "is_transient_event",
 ]

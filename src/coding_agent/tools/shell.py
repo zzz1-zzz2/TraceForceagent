@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from coding_agent.model.types import ToolResult
-from coding_agent.runtime.base import Runtime
+from coding_agent.runtime.base import Runtime, ToolExecutionContext
 from coding_agent.tools.base import Tool
 
 
@@ -37,7 +37,12 @@ class RunCommandTool(Tool):
         "required": ["command"],
     }
 
-    def execute(self, args: dict, runtime: Runtime) -> ToolResult:
+    def execute(
+        self,
+        args: dict,
+        runtime: Runtime,
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
         command = args.get("command", "")
         if not command:
             return ToolResult.fail("Missing required parameter: command")
@@ -54,7 +59,12 @@ class RunCommandTool(Tool):
             return ToolResult.fail("cwd escapes workspace boundary", is_runtime_error=True)
 
         try:
-            result = runtime.execute(command=command, cwd=target_cwd, timeout=timeout)
+            result = runtime.execute(
+                command=command,
+                cwd=target_cwd,
+                timeout=timeout,
+                context=context,
+            )
         except Exception as e:
             return self.exception_observation(e)
 
@@ -64,6 +74,15 @@ class RunCommandTool(Tool):
 
         # 检测是否是测试失败
         is_validation = self._looks_like_test_command(command) and result.exit_code != 0
+
+        if result.cancelled:
+            return ToolResult.fail(
+                f"$ {command}\n\nCommand cancelled",
+                is_runtime_error=True,
+                is_timeout=True,
+                truncated=truncated,
+                is_validation_failure=False,
+            )
 
         if result.exit_code == 0:
             return ToolResult.ok(

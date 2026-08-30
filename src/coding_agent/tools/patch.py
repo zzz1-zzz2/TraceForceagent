@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 from coding_agent.model.types import ToolResult
-from coding_agent.runtime.base import Runtime
+from coding_agent.runtime.base import Runtime, ToolExecutionContext
 from coding_agent.tools.base import Tool
 
 
@@ -54,7 +54,7 @@ class ApplyPatchTool(Tool):
         "required": ["path"],
     }
 
-    def execute(self, args: dict, runtime: Runtime) -> ToolResult:
+    def execute(self, args: dict, runtime: Runtime, context: ToolExecutionContext | None = None) -> ToolResult:
         path_str = args.get("path", "")
         if not path_str:
             return ToolResult.fail("Missing required parameter: path")

@@ -208,6 +208,8 @@ def _make_presentation(
 
 
 def _content(state: ToolUiState) -> str:
+    if state.status is ToolUiStatus.RUNNING and state.draft:
+        return state.draft
     if state.status is ToolUiStatus.ERROR and state.error:
         return state.error
     return state.content

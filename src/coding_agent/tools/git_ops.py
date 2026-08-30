@@ -13,7 +13,7 @@ from __future__ import annotations
 import subprocess
 
 from coding_agent.model.types import ToolResult
-from coding_agent.runtime.base import Runtime
+from coding_agent.runtime.base import Runtime, ToolExecutionContext
 from coding_agent.tools.base import Tool
 
 
@@ -49,7 +49,7 @@ class GitDiffTool(Tool):
         "required": [],
     }
 
-    def execute(self, args: dict, runtime: Runtime) -> ToolResult:
+    def execute(self, args: dict, runtime: Runtime, context: ToolExecutionContext | None = None) -> ToolResult:
         max_lines = min(args.get("max_lines", 200), 2000)
 
         # 1) 先 detect 是不是 git repo。`git diff --staged` 在非 repo 时会被
