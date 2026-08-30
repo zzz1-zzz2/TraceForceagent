@@ -21,6 +21,7 @@ from coding_agent.events import (
     FeedbackRecorded,
     FinishAccepted,
     ModelCompleted,
+    ModelDelta,
     ModelFailed,
     ModelResponseSnapshot,
     ModelStarted,
@@ -39,6 +40,7 @@ from coding_agent.events import (
 )
 from coding_agent.model.client import ModelClient
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
+from coding_agent.model.streaming import ModelStreamAccumulator, ModelStreamDelta
 from coding_agent.model.types import AgentAction, AssistantReplyAction, FinishAction, ToolResult
 from coding_agent.recovery.failure_refresh import FailureAwareRefresher
 from coding_agent.runtime.local import LocalRuntime
@@ -442,7 +444,31 @@ def _run_loop(
                 model=model_name,
             ))
             try:
-                response = model_client.generate(messages=messages, tools=registry.schemas())
+                stream_method = getattr(model_client, "generate_stream", None)
+                if callable(stream_method) and getattr(model_client, "supports_streaming", False):
+                    accumulator = ModelStreamAccumulator()
+                    for delta in stream_method(messages=messages, tools=registry.schemas()):
+                        token.raise_if_cancelled()
+                        if not isinstance(delta, ModelStreamDelta):
+                            raise TypeError(
+                                "ModelClient.generate_stream must yield ModelStreamDelta values"
+                            )
+                        accumulator.add(delta)
+                        events.emit(ModelDelta(
+                            run_id=run_id,
+                            turn=turn_number,
+                            step=state.step_count,
+                            model=model_name,
+                            text=delta.text,
+                            accumulated_text=accumulator.content,
+                            tool_call_index=delta.tool_call_index,
+                            tool_call_id=delta.tool_call_id,
+                            tool_name=delta.tool_name,
+                            arguments_delta=delta.arguments_delta,
+                        ))
+                    response = accumulator.finish()
+                else:
+                    response = model_client.generate(messages=messages, tools=registry.schemas())
             except Exception as exc:
                 events.emit(ModelFailed(
                     run_id=run_id,

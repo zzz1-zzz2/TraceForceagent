@@ -17,6 +17,7 @@ from coding_agent.events import (
     FeedbackRecorded,
     FinishAccepted,
     ModelCompleted,
+    ModelDelta,
     ModelFailed,
     RunCancelled,
     RunFailed,
@@ -279,6 +280,15 @@ class CodingAgentApp(App):
     async def _apply_event_to_widgets(self, event: object) -> None:
         if isinstance(event, RunStarted):
             await self._hide_welcome()
+        elif isinstance(event, ModelDelta):
+            assistant_key = (event.run_id, event.turn)
+            assistant_widget = self._assistant_widgets.get(assistant_key)
+            if assistant_widget is None:
+                assistant_widget = AssistantMessageWidget(event.accumulated_text)
+                self._assistant_widgets[assistant_key] = assistant_widget
+                await self._append(assistant_widget)
+            else:
+                assistant_widget.set_content(event.accumulated_text)
         elif isinstance(event, ModelCompleted):
             response = event.response
             if response is not None and response.content.strip():

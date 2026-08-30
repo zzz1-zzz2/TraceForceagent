@@ -18,6 +18,7 @@ from coding_agent.events import (
     FeedbackRecorded,
     FinishAccepted,
     ModelCompleted,
+    ModelDelta,
     ModelFailed,
     ModelStarted,
     RunCancelled,
@@ -193,6 +194,22 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             model=event.model,
             model_running=True,
             model_calls=state.model_calls + 1,
+        )
+
+    if isinstance(event, ModelDelta):
+        assistant_messages = state.assistant_messages
+        if assistant_messages:
+            assistant_messages = (*assistant_messages[:-1], event.accumulated_text)
+        elif event.accumulated_text:
+            assistant_messages = (event.accumulated_text,)
+        return replace(
+            state,
+            phase="thinking",
+            turn=event.turn,
+            step=event.step,
+            model=event.model or state.model,
+            model_running=True,
+            assistant_messages=assistant_messages,
         )
 
     if isinstance(event, ModelCompleted):

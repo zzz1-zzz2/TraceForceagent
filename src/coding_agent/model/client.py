@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,7 @@ import httpx2 as _httpx
 from openai import APIError, APITimeoutError, OpenAI, RateLimitError
 
 from coding_agent.config import AgentConfig
+from coding_agent.model.streaming import ModelStreamAccumulator, ModelStreamDelta
 from coding_agent.model.types import ModelResponse, TokenUsage, ToolCall
 
 
@@ -45,6 +47,11 @@ class ModelClient:
     统一接口：generate(messages, tools) -> ModelResponse
     """
 
+    # Streaming is enabled only on fully initialized clients. Keeping the
+    # class default false preserves compatibility with lightweight test doubles
+    # constructed via ``ModelClient.__new__``.
+    supports_streaming = False
+
     def __init__(
         self,
         api_key: str,
@@ -59,6 +66,7 @@ class ModelClient:
         self.model = model
         self.temperature = temperature
         self.max_retries = max_retries
+        self.supports_streaming = True
 
         # 默认禁用 httpx 的 env proxy 读取
         # 原因：很多用户 shell 中配置了 socks:// 之类不被 httpx 认识的 proxy scheme，
@@ -139,7 +147,8 @@ class ModelClient:
                 time.sleep(2 ** attempt)
             except APIError as e:
                 # 5xx 错误可重试
-                if e.status_code and 500 <= e.status_code < 600:
+                status_code = getattr(e, "status_code", None)
+                if status_code and 500 <= status_code < 600:
                     last_err = e
                     time.sleep(2 ** attempt)
                 else:
@@ -149,6 +158,112 @@ class ModelClient:
                 raise
 
         raise RuntimeError(f"ModelClient failed after {self.max_retries} retries: {last_err}")
+
+    def generate_stream(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> Iterator[ModelStreamDelta]:
+        """Yield provider-neutral deltas from an OpenAI-compatible stream.
+
+        The stream itself is transient; callers that need a durable response
+        should feed the deltas to :class:`ModelStreamAccumulator` and call
+        ``finish`` after iteration.  Retry behavior matches ``generate`` but a
+        retry only starts before any delta has been yielded.
+        """
+        last_err: Exception | None = None
+        for attempt in range(self.max_retries):
+            yielded = False
+            try:
+                kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": self.temperature,
+                    "stream": True,
+                }
+                if tools:
+                    kwargs["tools"] = tools
+                stream = self._client.chat.completions.create(**kwargs)
+                for chunk in stream:
+                    for delta in self._parse_stream_chunk(chunk):
+                        yielded = True
+                        yield delta
+                return
+            except RateLimitError as e:
+                last_err = e
+                if yielded:
+                    raise
+                time.sleep(2 ** (attempt + 2))
+            except APITimeoutError as e:
+                last_err = e
+                if yielded:
+                    raise
+                time.sleep(2 ** attempt)
+            except APIError as e:
+                status_code = getattr(e, "status_code", None)
+                if status_code and 500 <= status_code < 600:
+                    last_err = e
+                    if yielded:
+                        raise
+                    time.sleep(2 ** attempt)
+                else:
+                    raise
+            except Exception:
+                raise
+        raise RuntimeError(f"ModelClient streaming failed after {self.max_retries} retries: {last_err}")
+
+    def generate_stream_response(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> ModelResponse:
+        """Collect ``generate_stream`` into the existing durable response type."""
+        accumulator = ModelStreamAccumulator()
+        for delta in self.generate_stream(messages=messages, tools=tools):
+            accumulator.add(delta)
+        return accumulator.finish()
+
+    def _parse_stream_chunk(self, chunk: Any) -> list[ModelStreamDelta]:
+        """Normalize one OpenAI-compatible ``ChatCompletionChunk``."""
+        choices = getattr(chunk, "choices", None) or []
+        usage = getattr(chunk, "usage", None)
+        usage_value = None
+        if usage is not None:
+            usage_value = TokenUsage(
+                input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            )
+        if not choices:
+            return [ModelStreamDelta(usage=usage_value)] if usage_value else []
+        deltas: list[ModelStreamDelta] = []
+        for choice in choices:
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                deltas.append(ModelStreamDelta(
+                    finish_reason=getattr(choice, "finish_reason", None) or "",
+                    usage=usage_value,
+                ))
+                continue
+            tool_calls = getattr(delta, "tool_calls", None) or []
+            if not tool_calls:
+                deltas.append(ModelStreamDelta(
+                    text=getattr(delta, "content", None) or "",
+                    finish_reason=getattr(choice, "finish_reason", None) or "",
+                    usage=usage_value,
+                ))
+                continue
+            for call in tool_calls:
+                function = getattr(call, "function", None)
+                deltas.append(ModelStreamDelta(
+                    text=getattr(delta, "content", None) or "",
+                    tool_call_index=getattr(call, "index", None),
+                    tool_call_id=getattr(call, "id", None) or "",
+                    tool_name=getattr(function, "name", None) or "" if function else "",
+                    arguments_delta=getattr(function, "arguments", None) or "" if function else "",
+                    finish_reason=getattr(choice, "finish_reason", None) or "",
+                    usage=usage_value,
+                ))
+        return deltas
 
     def chat(
         self,
@@ -162,7 +277,7 @@ class ModelClient:
         """
         resp = self._client.chat.completions.create(
             model=self.model,
-            messages=messages,
+            messages=messages,  # type: ignore[arg-type]
             max_tokens=max_tokens,
             temperature=self.temperature if temperature is None else temperature,
         )

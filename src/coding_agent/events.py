@@ -271,6 +271,26 @@ class ModelStarted(BaseEvent):
 
 
 @dataclass(frozen=True, kw_only=True)
+class ModelDelta(BaseEvent):
+    """Transient increment emitted while a model response is streaming.
+
+    Deltas are observable UI facts, not session history.  The complete response
+    remains the durable boundary represented by :class:`ModelCompleted`.
+    """
+
+    event_type: ClassVar[str] = "model_delta"
+    turn: int = 0
+    step: int = 0
+    model: str = ""
+    text: str = ""
+    accumulated_text: str = ""
+    tool_call_index: int | None = None
+    tool_call_id: str = ""
+    tool_name: str = ""
+    arguments_delta: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
 class ModelCompleted(BaseEvent):
     event_type: ClassVar[str] = "model_completed"
     turn: int = 0
@@ -361,6 +381,7 @@ AgentEvent: TypeAlias = (
     | TurnStarted
     | TurnEnded
     | ModelStarted
+    | ModelDelta
     | ModelCompleted
     | ModelFailed
     | ToolStarted
@@ -375,6 +396,7 @@ __all__ = [
     "FeedbackRecorded",
     "FinishAccepted",
     "ModelCompleted",
+    "ModelDelta",
     "ModelFailed",
     "ModelResponseSnapshot",
     "ModelStarted",
