@@ -34,6 +34,7 @@ from coding_agent.events import (
     TurnStarted,
     ValidationCompleted,
 )
+from coding_agent.tui.formatting import PREVIEW_CHARS
 
 
 class ToolUiStatus(StrEnum):
@@ -47,6 +48,7 @@ class ToolUiStatus(StrEnum):
 
 ToolKey = tuple[str, str]
 AssistantKey = tuple[str, int]
+DRAFT_PREVIEW_CHARS = PREVIEW_CHARS
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,7 @@ class ToolUiState:
     is_runtime_error: bool = False
     is_timeout: bool = False
     is_cancelled: bool = False
+    draft_truncated: bool = False
     chunk_index: int = 0
     sequence_started: int = 0
     sequence_completed: int = 0
@@ -314,9 +317,15 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
         previous = tools.get(key)
         if previous is None:
             return state
+        updated_draft = previous.draft + event.text
+        draft_truncated = previous.draft_truncated
+        if len(updated_draft) > DRAFT_PREVIEW_CHARS:
+            updated_draft = updated_draft[-DRAFT_PREVIEW_CHARS:]
+            draft_truncated = True
         updated = replace(
             previous,
-            draft=previous.draft + event.text,
+            draft=updated_draft,
+            draft_truncated=draft_truncated,
             chunk_index=event.chunk_index,
             turn=event.turn,
             step=event.step,
@@ -348,9 +357,10 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             error=(result.error if result is not None else event.reason) or "cancelled",
             summary=(result.summary if result is not None else "") or event.reason,
             truncated=result.truncated if result is not None else False,
-            is_runtime_error=True,
-            is_timeout=True,
+            is_runtime_error=result.is_runtime_error if result is not None else True,
+            is_timeout=result.is_timeout if result is not None else False,
             is_cancelled=True,
+            draft_truncated=previous.draft_truncated if previous else False,
             sequence_started=previous.sequence_started if previous else 0,
             sequence_completed=event.sequence,
         )
@@ -565,6 +575,8 @@ def _reduce_tool_terminal(
         is_validation_failure=result.is_validation_failure if result is not None else False,
         is_runtime_error=result.is_runtime_error if result is not None else False,
         is_timeout=result.is_timeout if result is not None else False,
+        is_cancelled=result.is_cancelled if result is not None else False,
+        draft_truncated=False,
         sequence_started=previous.sequence_started if previous else 0,
         sequence_completed=event.sequence,
     )
@@ -582,6 +594,7 @@ __all__ = [
     "ToolKey",
     "ToolUiState",
     "ToolUiStatus",
+    "DRAFT_PREVIEW_CHARS",
     "ValidationUiState",
     "initial_ui_state",
     "reduce_event",

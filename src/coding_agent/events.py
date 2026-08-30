@@ -97,6 +97,7 @@ class ToolResultSnapshot:
     is_validation_failure: bool = False
     is_runtime_error: bool = False
     is_timeout: bool = False
+    is_cancelled: bool = False
     summary: str = ""
 
     @classmethod
@@ -109,6 +110,7 @@ class ToolResultSnapshot:
             is_validation_failure=bool(getattr(result, "is_validation_failure", False)),
             is_runtime_error=bool(getattr(result, "is_runtime_error", False)),
             is_timeout=bool(getattr(result, "is_timeout", False)),
+            is_cancelled=bool(getattr(result, "is_cancelled", False)),
             summary=str(getattr(result, "summary", "") or ""),
         )
 

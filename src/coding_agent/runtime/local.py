@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import codecs
 import os
 import signal
 import subprocess
@@ -71,24 +72,33 @@ class LocalRuntime(Runtime):
         sink = context.on_output if context is not None else None
         token = context.cancellation_token if context is not None else None
         buffer = _StreamingBuffer(max_chars=self.max_output)
+        stream_offset = 0
 
         def emit(text: str) -> None:
-            if not text or sink is None:
-                buffer.append(text)
+            nonlocal stream_offset
+            if not text:
                 return
-            chunk = RuntimeOutputChunk(text=text, chunk_index=buffer.length)
+            stream_offset_start = stream_offset
+            stream_offset += len(text)
             buffer.append(text)
+            if sink is None:
+                return
+            chunk = RuntimeOutputChunk(text=text, chunk_index=stream_offset_start)
             try:
-                sink(chunk)
+                output_sink = sink
+                if output_sink is not None:
+                    output_sink(chunk)
             except Exception:
                 # Streaming is best-effort: an observer failure must not crash
                 # the running subprocess.
                 pass
 
-        proc: subprocess.Popen[str] | None = None
+        proc: subprocess.Popen[bytes] | None = None
         stdout_thread: threading.Thread | None = None
         stderr_thread: threading.Thread | None = None
+        watcher: threading.Thread | None = None
         cancel_flag = threading.Event()
+        process_done = threading.Event()
 
         try:
             proc = subprocess.Popen(
@@ -97,36 +107,35 @@ class LocalRuntime(Runtime):
                 cwd=str(cwd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
+                text=False,
                 env=full_env,
                 executable="/bin/bash",
                 start_new_session=True,
-                bufsize=1,
+                bufsize=0,
             )
 
             assert proc.stdout is not None
 
             def _drain() -> None:
                 assert proc is not None and proc.stdout is not None
+                decoder = codecs.getincrementaldecoder("utf-8")()
+                output_fd = proc.stdout.fileno()
                 while True:
-                    chunk = proc.stdout.read(4096)
+                    chunk = os.read(output_fd, 4096)
                     if not chunk:
+                        remainder = decoder.decode(b"", final=True)
+                        if remainder:
+                            emit(remainder)
                         return
-                    emit(chunk)
+                    text = decoder.decode(chunk)
+                    if text:
+                        emit(text)
                     if token is not None and getattr(token, "is_cancelled", False):
                         cancel_flag.set()
                         # Terminate proactively so the main thread's
                         # ``proc.wait`` returns promptly even when the child
                         # never produces more output (e.g. ``sleep N``).
-                        try:
-                            os.killpg(proc.pid, signal.SIGTERM)
-                        except ProcessLookupError:
-                            return
-                        except Exception:
-                            try:
-                                proc.terminate()
-                            except Exception:
-                                return
+                        self._terminate_process_group(proc, grace=0.5)
                         return
 
             stdout_thread = threading.Thread(
@@ -137,22 +146,15 @@ class LocalRuntime(Runtime):
 
             # Cancellation watcher: when the token trips, kill the whole
             # process group so even output-silent commands exit quickly.
-            watcher: threading.Thread | None = None
             if token is not None:
 
                 def _watch() -> None:
-                    while not getattr(token, "is_cancelled", False):
-                        time.sleep(0.05)
-                    cancel_flag.set()
-                    try:
-                        os.killpg(proc.pid, signal.SIGTERM)
-                    except ProcessLookupError:
+                    while not process_done.wait(0.05):
+                        if not getattr(token, "is_cancelled", False):
+                            continue
+                        cancel_flag.set()
+                        self._terminate_process_group(proc, grace=0.5)
                         return
-                    except Exception:
-                        try:
-                            proc.terminate()
-                        except Exception:
-                            return
 
                 watcher = threading.Thread(
                     target=_watch, name="traceforce-runtime-cancel", daemon=True
@@ -163,6 +165,7 @@ class LocalRuntime(Runtime):
                 rc = proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 self._terminate_process_group(proc, grace=0.5)
+                process_done.set()
                 if stdout_thread is not None:
                     stdout_thread.join(timeout=1.0)
                 if watcher is not None:
@@ -175,8 +178,10 @@ class LocalRuntime(Runtime):
                     duration=duration,
                     truncated=buffer.truncated,
                     cancelled=False,
+                    timed_out=True,
                 )
 
+            process_done.set()
             if stdout_thread is not None:
                 stdout_thread.join(timeout=2.0)
             if watcher is not None:
@@ -217,11 +222,12 @@ class LocalRuntime(Runtime):
                 stdout_thread.join(timeout=0.5)
             if stderr_thread is not None and stderr_thread.is_alive():
                 stderr_thread.join(timeout=0.5)
-            if 'watcher' in locals() and watcher is not None and watcher.is_alive():
-                watcher.join(timeout=0.2)
+            process_done.set()
+            if watcher is not None and watcher.is_alive():
+                watcher.join(timeout=0.5)
 
     @staticmethod
-    def _terminate_process_group(proc: subprocess.Popen[str], *, grace: float) -> None:
+    def _terminate_process_group(proc: subprocess.Popen[bytes], *, grace: float) -> None:
         """Terminate the whole process group, escalating to SIGKILL after ``grace`` seconds."""
         if proc.poll() is not None:
             return

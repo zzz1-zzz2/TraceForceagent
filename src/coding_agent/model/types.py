@@ -167,6 +167,7 @@ class ToolResult:
     is_validation_failure: bool = False  # pytest exit 1 标记
     is_runtime_error: bool = False  # timeout / executable not found
     is_timeout: bool = False  # 命令 timeout（细分自 is_runtime_error）
+    is_cancelled: bool = False  # 用户主动取消
     summary: str = ""  # 简短摘要（用于 Working State）
 
     @classmethod

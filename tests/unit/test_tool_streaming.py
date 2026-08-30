@@ -27,9 +27,7 @@ identity check and the streaming runtime are accepted into ``main``:
 
 from __future__ import annotations
 
-import asyncio
 import json
-import signal
 import subprocess
 import threading
 import time
@@ -37,31 +35,22 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from textual.widgets import Input
 
 from coding_agent.agent.cancellation import CancellationToken
-from coding_agent.agent.loop import AgentRunResult, run as agent_run
+from coding_agent.agent.loop import AgentRunResult
+from coding_agent.agent.loop import run as agent_run
 from coding_agent.config import AgentConfig
 from coding_agent.emitter import EventEmitter
 from coding_agent.events import (
     AgentEvent,
-    ModelCompleted,
     ModelDelta,
-    ModelResponseSnapshot,
-    ModelStarted,
-    RunCancelled,
-    RunFailed,
-    RunFinished,
     RunStarted,
-    RunStateSnapshot,
     ToolCancelled,
     ToolCompleted,
     ToolFailed,
     ToolOutputDelta,
     ToolResultSnapshot,
     ToolStarted,
-    TurnEnded,
-    TurnStarted,
 )
 from coding_agent.model.client import ModelClient
 from coding_agent.model.types import (
@@ -72,23 +61,23 @@ from coding_agent.model.types import (
 from coding_agent.runtime.base import (
     RuntimeOutputChunk,
     ToolExecutionContext,
+    _StreamingBuffer,
 )
 from coding_agent.runtime.local import LocalRuntime
 from coding_agent.session import AgentSession
-from coding_agent.tools.finish import FinishTool
 from coding_agent.tools.filesystem import ListFilesTool
+from coding_agent.tools.finish import FinishTool
 from coding_agent.tools.plan import UpdatePlanTool
 from coding_agent.tools.shell import RunCommandTool
 from coding_agent.trajectory.events import is_transient_event
 from coding_agent.tui.app import CodingAgentApp
-from coding_agent.tui.bridge import AgentWorker, AgentWorkerResult, UiAgentEvent
+from coding_agent.tui.bridge import UiAgentEvent
 from coding_agent.tui.state import (
     ToolUiStatus,
     initial_ui_state,
     reduce_event,
 )
 from coding_agent.tui.widgets import ToolExecutionWidget
-
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -165,7 +154,8 @@ def _tool_cancelled(
             content=content,
             error=reason,
             is_runtime_error=True,
-            is_timeout=True,
+            is_timeout=False,
+            is_cancelled=True,
         ),
         reason=reason,
     )
@@ -268,6 +258,31 @@ def test_trajectory_sink_drops_tool_output_delta_records(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
+def test_streaming_buffer_keeps_only_bounded_tail() -> None:
+    buffer = _StreamingBuffer(max_chars=5)
+    buffer.append("abc")
+    buffer.append("defgh")
+    assert buffer.render() == "defgh"
+    assert buffer.length == 5
+    assert buffer.truncated is True
+
+
+def test_streaming_buffer_handles_oversized_single_chunk() -> None:
+    buffer = _StreamingBuffer(max_chars=4)
+    buffer.append("0123456789")
+    assert buffer.render() == "6789"
+    assert buffer.length == 4
+    assert buffer.truncated is True
+
+
+def test_streaming_buffer_zero_capacity_discards_output() -> None:
+    buffer = _StreamingBuffer(max_chars=0)
+    buffer.append("output")
+    assert buffer.render() == ""
+    assert buffer.length == 0
+    assert buffer.truncated is True
+
+
 def test_local_runtime_emits_stdout_chunks_in_order(tmp_path: Path) -> None:
     """Stdout chunks reach ``on_output`` in the order Popen produced them."""
     config = _config(tmp_path)
@@ -341,6 +356,69 @@ def test_local_runtime_high_frequency_chunks_keep_order(tmp_path: Path) -> None:
     assert [c.chunk_index for c in chunks] == sorted(c.chunk_index for c in chunks)
 
 
+def test_streaming_chunks_arrive_before_command_finishes(tmp_path: Path) -> None:
+    """Output callbacks fire while a command is still running."""
+    runtime = LocalRuntime(tmp_path, _config(tmp_path))
+    first_chunk = threading.Event()
+    chunks: list[RuntimeOutputChunk] = []
+    execution: dict[str, object] = {}
+
+    def on_output(chunk: RuntimeOutputChunk) -> None:
+        chunks.append(chunk)
+        first_chunk.set()
+
+    def execute() -> None:
+        execution["result"] = runtime.execute(
+            "for i in $(seq 1 8); do printf 'tick$i\\n'; sleep 0.05; done",
+            tmp_path,
+            timeout=5,
+            context=ToolExecutionContext(on_output=on_output),
+        )
+
+    worker = threading.Thread(target=execute)
+    start = time.monotonic()
+    worker.start()
+    assert first_chunk.wait(timeout=1.0)
+    first_chunk_at = time.monotonic()
+    assert worker.is_alive(), "first chunk arrived only after command exited"
+    assert first_chunk_at - start < 0.4
+    worker.join(timeout=3.0)
+    assert not worker.is_alive()
+    result = execution["result"]
+    assert result.exit_code == 0  # type: ignore[union-attr]
+    assert len(chunks) >= 1
+    assert time.monotonic() - start >= 0.3
+
+
+def test_local_runtime_watcher_exits_after_cancellation(tmp_path: Path) -> None:
+    """An output-silent cancellation leaves no live watcher thread behind."""
+    runtime = LocalRuntime(tmp_path, _config(tmp_path))
+    token = CancellationToken()
+    result_holder: dict[str, object] = {}
+
+    def execute() -> None:
+        result_holder["result"] = runtime.execute(
+            "sleep 5",
+            tmp_path,
+            timeout=10,
+            context=ToolExecutionContext(cancellation_token=token),
+        )
+
+    worker = threading.Thread(target=execute)
+    worker.start()
+    time.sleep(0.1)
+    token.cancel()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+    result = result_holder["result"]
+    assert result.cancelled is True  # type: ignore[union-attr]
+    assert not any(
+        thread.name == "traceforce-runtime-cancel" and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+    assert not _any_sleep_process_alive()
+
+
 def test_local_runtime_timeout_terminates_process_group(tmp_path: Path) -> None:
     """A timed-out command kills the whole process group, not just the shell."""
     config = _config(tmp_path)
@@ -356,6 +434,43 @@ def test_local_runtime_timeout_terminates_process_group(tmp_path: Path) -> None:
     assert result.exit_code == -1
     assert "timeout" in result.stderr.lower()
     assert result.cancelled is False
+    assert result.timed_out is True
+
+
+def test_local_runtime_timeout_preserves_partial_output(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    runtime = LocalRuntime(tmp_path, config)
+    result = runtime.execute(
+        "printf 'line1\\nline2\\n'; sleep 5",
+        tmp_path,
+        timeout=1,
+    )
+    assert result.timed_out is True
+    assert result.cancelled is False
+    assert "line1\nline2\n" in result.stdout
+    assert result.truncated is False
+
+
+def test_local_runtime_cancellation_preserves_partial_output(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    runtime = LocalRuntime(tmp_path, config)
+    token = CancellationToken()
+
+    def trip() -> None:
+        time.sleep(0.2)
+        token.cancel()
+
+    threading.Thread(target=trip, daemon=True).start()
+    result = runtime.execute(
+        "printf 'line1\\nline2\\n'; sleep 5",
+        tmp_path,
+        timeout=10,
+        context=ToolExecutionContext(cancellation_token=token),
+    )
+    assert result.cancelled is True
+    assert result.timed_out is False
+    assert "line1\nline2\n" in result.stdout
+    assert result.truncated is False
 
 
 def test_local_runtime_cancellation_terminates_process_group(tmp_path: Path) -> None:
@@ -383,6 +498,7 @@ def test_local_runtime_cancellation_terminates_process_group(tmp_path: Path) -> 
     assert result.exit_code == -1
     # The child should already be gone — no stragglers.
     assert not _any_sleep_process_alive()
+
 
 
 def _any_sleep_process_alive() -> bool:
@@ -433,9 +549,7 @@ def test_cancelled_run_publishes_tool_cancelled_then_run_cancelled(
 
     # Trip the token shortly after the loop has begun; the real LocalRuntime
     # ``execute`` runs ``sleep 5`` via a process group, which the cancellation
-    # watcher kills and reports via ``RuntimeResult.cancelled=True``. The
-    # shell tool then turns that into a ``ToolResult(is_timeout=True)``, which
-    # the loop turns into a ``ToolCancelled`` event.
+    # watcher kills and reports via ``RuntimeResult.cancelled=True``.
     def trip() -> None:
         time.sleep(0.3)
         token.cancel()
@@ -466,9 +580,110 @@ def test_cancelled_run_publishes_tool_cancelled_then_run_cancelled(
     assert types.index("tool_cancelled") < types.index("run_cancelled")
 
 
-# ---------------------------------------------------------------------------
-# MVP4.4-0: worker identity gate (transient + terminal)
-# ---------------------------------------------------------------------------
+def test_timeout_emits_tool_failed_not_tool_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class TimeoutToolModel:
+        model = "fake"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, messages, tools=None):
+            self.calls += 1
+            if self.calls > 1:
+                return ModelResponse(
+                    content="timeout observed",
+                    finish_reason="stop",
+                    usage=TokenUsage(input_tokens=1, output_tokens=1),
+                )
+            return ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id=f"call-timeout-{self.calls}",
+                        name="run_command",
+                        arguments={"command": "sleep 5", "timeout": 1},
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage=TokenUsage(input_tokens=1, output_tokens=1),
+            )
+
+    monkeypatch.setattr(
+        ModelClient,
+        "from_config",
+        classmethod(lambda cls, config: TimeoutToolModel()),
+    )
+    collector = _Collector()
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+    session = AgentSession(tmp_path)
+    result = agent_run(
+        "timeout",
+        tmp_path,
+        _config(tmp_path),
+        emitter=emitter,
+        session=session,
+    )
+    assert result.stop_reason == "assistant_reply"
+    types = [event.event_type for event in collector.events]
+    assert types.count("tool_failed") == 1, types
+    assert types.count("tool_cancelled") == 0, types
+    failed = next(event for event in collector.events if event.event_type == "tool_failed")
+    assert isinstance(failed, ToolFailed)
+    assert failed.result is not None
+    assert failed.result.is_timeout is True
+    assert failed.result.is_cancelled is False
+
+
+
+
+@pytest.mark.asyncio
+async def test_tool_delta_burst_is_coalesced_by_render_throttle(tmp_path: Path) -> None:
+    """Reducer keeps every delta while the tool widget renders one burst once."""
+    app = CodingAgentApp(workspace=tmp_path)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._worker_generation += 1  # type: ignore[attr-defined]
+        active_worker_id = app._worker_generation  # type: ignore[attr-defined]
+
+        class _StubWorker:
+            def __init__(self, wid: int) -> None:
+                self.worker_id = wid
+
+        app._worker = _StubWorker(active_worker_id)  # type: ignore[attr-defined]
+        run_id = "run-burst"
+        await app.on_ui_agent_event(
+            UiAgentEvent(_started(run_id, 1), worker_id=active_worker_id)
+        )
+        await app.on_ui_agent_event(
+            UiAgentEvent(_tool_started(run_id, 2, "burst"), worker_id=active_worker_id)
+        )
+        widget = app._tool_widgets[(run_id, "burst")]  # type: ignore[attr-defined]
+        calls: list[str] = []
+        original_apply_state = widget.apply_state
+
+        def observe(state: object) -> None:
+            calls.append("render")
+            original_apply_state(state)  # type: ignore[arg-type]
+
+        widget.apply_state = observe  # type: ignore[method-assign]
+        fragments = [f"chunk-{i}\n" for i in range(200)]
+        for sequence, text in enumerate(fragments, start=3):
+            await app.on_ui_agent_event(
+                UiAgentEvent(
+                    _tool_output_delta(run_id, sequence, "burst", text, sequence - 3),
+                    worker_id=active_worker_id,
+                )
+            )
+
+        tool = app._ui_state.tools[(run_id, "burst")]  # type: ignore[attr-defined]
+        assert tool.draft == "".join(fragments)[-2_400:]
+        assert len(calls) == 0
+        await pilot.pause(delay=0.1)
+        assert 1 <= len(calls) < 10
+        assert app._ui_state.tools[(run_id, "burst")].draft == "".join(fragments)[-2_400:]  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -640,10 +855,9 @@ def test_ui_preview_is_bounded_by_max_tool_output(tmp_path: Path) -> None:
             _tool_output_delta(run_id, 3 + i, "a-1", "x" * 1000, i * 1000),
         )
     tool = state.tools[(run_id, "a-1")]
-    # draft tracks the streamed text accumulated by the reducer (deltas are
-    # raw UI facts); the *durable* ToolCompleted below is what enforces the
-    # hard bound for storage and final rendering.
-    assert len(tool.draft) == 50_000
+    assert len(tool.draft) <= 2_400
+    assert tool.draft.endswith("x" * 2_400)
+    assert tool.draft_truncated is True
     completed = ToolCompleted(
         run_id=run_id,
         sequence=100,

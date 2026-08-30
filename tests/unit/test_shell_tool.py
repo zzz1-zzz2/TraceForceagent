@@ -1,11 +1,15 @@
 """Shell tool 单元测试：timeout / 正常退出 / 测试失败。"""
 
 import sys
+import threading
+import time
 
 import pytest
 
+from coding_agent.agent.cancellation import CancellationToken
 from coding_agent.config import AgentConfig
 from coding_agent.model.types import ToolResult
+from coding_agent.runtime.base import ToolExecutionContext
 from coding_agent.runtime.local import LocalRuntime
 from coding_agent.tools.shell import RunCommandTool
 
@@ -66,12 +70,33 @@ class TestRunCommandTimeout:
     def test_timeout_marks_is_timeout(self, runtime, tool):
         """超时命令应标记 is_timeout=True。"""
         result = tool.execute(
-            {"command": "sleep 5", "timeout": 1},
+            {"command": "printf 'line1\\nline2\\n'; sleep 5", "timeout": 1},
             runtime,
         )
         assert not result.success
         assert result.is_timeout
+        assert not result.is_cancelled
         assert result.is_runtime_error
+        assert "line1\nline2\n" in result.content
+
+    def test_cancel_preserves_partial_output_and_flags_cancelled(self, runtime, tool):
+        token = CancellationToken()
+
+        def trip() -> None:
+            time.sleep(0.2)
+            token.cancel()
+
+        threading.Thread(target=trip, daemon=True).start()
+        result = tool.execute(
+            {"command": "printf 'line1\\nline2\\n'; sleep 5", "timeout": 10},
+            runtime,
+            context=ToolExecutionContext(cancellation_token=token),
+        )
+        assert not result.success
+        assert result.is_cancelled
+        assert not result.is_timeout
+        assert result.is_runtime_error
+        assert "line1\nline2\n" in result.content
 
 
 class TestRunCommandBoundary:

@@ -728,14 +728,7 @@ def _run_loop(
 
             result_snapshot = ToolResultSnapshot.from_result(observation)
             terminal_emitted = False
-            if action.tool_name == "run_command" and observation.is_timeout:
-                # Timeout or cooperative cancellation: emit ``ToolCancelled``
-                # as the authoritative durable boundary so observers do not
-                # treat a stopped-by-user/cancelled-by-deadline tool as a
-                # generic runtime failure. ``is_runtime_error`` may also be
-                # True in this state (LocalRuntime marks cancelled exits as
-                # runtime errors), so this branch must precede the generic
-                # failure branch.
+            if action.tool_name == "run_command" and observation.is_cancelled:
                 events.emit(ToolCancelled(
                     run_id=run_id,
                     turn=turn_number,

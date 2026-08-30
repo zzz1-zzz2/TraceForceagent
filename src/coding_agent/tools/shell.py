@@ -76,10 +76,13 @@ class RunCommandTool(Tool):
         is_validation = self._looks_like_test_command(command) and result.exit_code != 0
 
         if result.cancelled:
-            return ToolResult.fail(
-                f"$ {command}\n\nCommand cancelled",
+            return ToolResult(
+                success=False,
+                content=f"$ {command}\n\n{output}",
+                error="Command cancelled",
                 is_runtime_error=True,
-                is_timeout=True,
+                is_timeout=False,
+                is_cancelled=True,
                 truncated=truncated,
                 is_validation_failure=False,
             )
@@ -93,11 +96,14 @@ class RunCommandTool(Tool):
 
         # exit != 0
         # 区分 command failure（程序自身失败）和 tool error（runtime error）
-        if result.exit_code == -1:  # timeout
-            return ToolResult.fail(
-                f"$ {command}\n\nTimeout after {timeout}s",
+        if result.timed_out or result.exit_code == -1:  # timeout
+            return ToolResult(
+                success=False,
+                content=f"$ {command}\n\n{output}",
+                error=f"Timeout after {timeout}s",
                 is_runtime_error=True,
                 is_timeout=True,
+                is_cancelled=False,
                 truncated=truncated,
                 is_validation_failure=False,
             )

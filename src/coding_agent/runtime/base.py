@@ -22,6 +22,7 @@ class RuntimeResult:
     duration: float
     truncated: bool = False
     cancelled: bool = False
+    timed_out: bool = False
 
     @property
     def combined_output(self) -> str:
@@ -126,13 +127,31 @@ class _StreamingBuffer:
     def append(self, text: str) -> None:
         if not text:
             return
+        if self.max_chars <= 0:
+            self.truncated = True
+            self.parts.clear()
+            self.length = 0
+            return
+        if len(text) > self.max_chars:
+            self.parts = [text[-self.max_chars:]]
+            self.length = self.max_chars
+            self.truncated = True
+            return
         self.parts.append(text)
         self.length += len(text)
         if self.length > self.max_chars:
+            overflow = self.length - self.max_chars
+            while overflow and self.parts:
+                head = self.parts[0]
+                if len(head) <= overflow:
+                    self.parts.pop(0)
+                    self.length -= len(head)
+                    overflow -= len(head)
+                else:
+                    self.parts[0] = head[overflow:]
+                    self.length -= overflow
+                    overflow = 0
             self.truncated = True
 
     def render(self) -> str:
-        if not self.truncated:
-            return "".join(self.parts)
-        joined = "".join(self.parts)
-        return joined[-self.max_chars:] if len(joined) > self.max_chars else joined
+        return "".join(self.parts)

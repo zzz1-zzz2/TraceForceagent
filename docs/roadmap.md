@@ -9,10 +9,10 @@ materials under `docs/archive/` are historical reference only.
 
 | State | Value |
 | --- | --- |
-| Current baseline | `main @ 581c64c` |
-| Test baseline | `473 passed` |
+| Current baseline | `main @ 9f8304a` |
+| Test baseline | `483 passed` |
 | Current milestone | **MVP4 Visual Demo** |
-| Active card | **MVP4.4 Tool Output Streaming** |
+| Active card | **MVP4.4.1 Runtime Hardening** |
 | Target release | `v0.1.0-alpha.1` |
 | Platforms | Ubuntu 22.04 / 24.04, WSL2 — Python 3.11 / 3.12 |
 
@@ -105,9 +105,8 @@ materials under `docs/archive/` are historical reference only.
   is the authoritative durable boundary.
 - The AgentLoop emits the exact `ToolStarted → ToolOutputDelta × N →
   ToolCancelled → RunCancelled` ordering for cancelled `run_command` tools,
-  and `ToolCancelled` precedes the generic `ToolFailed` branch when a
-  cancelled command reports `is_runtime_error=True` alongside
-  `is_timeout=True`.
+  and timeout now emits `ToolFailed` with `is_timeout=True` rather than
+  `ToolCancelled`.
 - The TUI reducer and presenter accumulate streamed output in
   `ToolUiState.draft`, clear it on terminal events, and keep the bounded
   preview visible without growing without bound.
@@ -120,6 +119,19 @@ materials under `docs/archive/` are historical reference only.
   termination, cancellation ordering, session call/result pairing, late
   worker-delta rejection, terminal in-place widget update, narrow-width
   layout stability, and non-shell tool zero-regression.
+
+### MVP4.4.1 — Runtime Hardening ✅
+
+- `LocalRuntime` now bounds its raw tail buffer at append time and keeps a
+  monotonic stream offset even after old output is evicted.
+- Cancellation watchers stop on a shared process-completion signal; cancel
+  and timeout remain distinct through Runtime, ToolResult, events, and TUI.
+- Cancelled and timed-out commands preserve bounded partial output, while the
+  loop emits `ToolCancelled` only for user cancellation and `ToolFailed` for
+  timeout.
+- Tool-output widgets render through a 70 ms coalescing timer, and real-time
+  tests verify in-flight chunks, watcher teardown, bounded storage, and burst
+  rendering without credentials or network calls.
 
 ### Greenfield Reality Gate
 

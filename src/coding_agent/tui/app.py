@@ -56,7 +56,7 @@ from coding_agent.tui.widgets import (
 class CodingAgentApp(App):
     """TraceForce TUI with a stable transcript and fixed status area."""
 
-    STREAM_RENDER_INTERVAL = 0.04
+    STREAM_RENDER_INTERVAL = 0.07
 
     CSS_PATH = "tui.css"
     BINDINGS = [
@@ -88,6 +88,7 @@ class CodingAgentApp(App):
         self._welcome: WelcomeWidget | None = None
         self._assistant_widgets: dict[tuple[str, int], AssistantMessageWidget] = {}
         self._pending_assistant_renders: dict[tuple[str, int], str] = {}
+        self._pending_tool_renders: set[tuple[str, str]] = set()
         self._stream_render_timer: Timer | None = None
         self._tool_widgets: dict[tuple[str, str], ToolExecutionWidget] = {}
         self._validation_widgets: dict[tuple[str, int], ValidationWidget] = {}
@@ -155,21 +156,39 @@ class CodingAgentApp(App):
             self._stream_render_timer.stop()
             self._stream_render_timer = None
 
-    def _flush_pending_assistant_renders(
-        self, assistant_key: tuple[str, int] | None = None
+    def _flush_pending_stream_renders(
+        self, stream_key: tuple[str, int] | tuple[str, str] | None = None
     ) -> None:
-        keys = (
-            [assistant_key]
-            if assistant_key is not None
-            else list(self._pending_assistant_renders)
-        )
-        for key in keys:
+        if stream_key is None:
+            assistant_keys = list(self._pending_assistant_renders)
+        elif isinstance(stream_key[1], int):
+            assistant_keys = [stream_key]
+        else:
+            assistant_keys = []
+        for key in assistant_keys:
             content = self._pending_assistant_renders.pop(key, None)
             widget = self._assistant_widgets.get(key)
             if content is not None and widget is not None:
                 widget.set_content(content)
-        if not self._pending_assistant_renders:
+        tool_keys = (
+            list(self._pending_tool_renders)
+            if stream_key is None
+            else [stream_key] if isinstance(stream_key[1], str) else []
+        )
+        for tool_key in tool_keys:
+            self._pending_tool_renders.discard(tool_key)
+            tool_widget = self._tool_widgets.get(tool_key)
+            tool_state = self._ui_state.tools.get(tool_key)
+            if tool_widget is not None and tool_state is not None:
+                tool_widget.apply_state(tool_state)
+        if not self._pending_assistant_renders and not self._pending_tool_renders:
             self._cancel_stream_render_timer()
+
+    def _flush_pending_assistant_renders(
+        self, assistant_key: tuple[str, int] | None = None
+    ) -> None:
+        """Compatibility wrapper for callers and existing test hooks."""
+        self._flush_pending_stream_renders(assistant_key)
 
     def _schedule_stream_render(self) -> None:
         if self._stream_render_timer is None:
@@ -192,6 +211,7 @@ class CodingAgentApp(App):
         await self._transcript().clear_entries()
         self._assistant_widgets.clear()
         self._pending_assistant_renders.clear()
+        self._pending_tool_renders.clear()
         self._tool_widgets.clear()
         self._validation_widgets.clear()
         self._notice_widgets.clear()
@@ -388,7 +408,8 @@ class CodingAgentApp(App):
                 self._tool_widgets[tool_key] = tool_widget
                 await self._append(tool_widget)
             else:
-                tool_widget.apply_state(tool_state)
+                self._pending_tool_renders.add(tool_key)
+                self._schedule_stream_render()
         elif isinstance(event, ToolStarted):
             tool_key = (event.run_id, event.action_id)
             tool_state = self._ui_state.tools.get(tool_key)
@@ -403,6 +424,7 @@ class CodingAgentApp(App):
                 tool_widget.apply_state(tool_state)
         elif isinstance(event, (ToolCompleted, ToolFailed, ToolCancelled)):
             tool_key = (event.run_id, event.action_id)
+            self._flush_pending_stream_renders(tool_key)
             tool_state = self._ui_state.tools.get(tool_key)
             if tool_state is None:
                 return
