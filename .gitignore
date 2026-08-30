@@ -25,9 +25,9 @@ ENV/
 .env.local
 .env.*.local
 
-# 运行产物
+# Local runtime workspace and generated outputs
 # trajectory 已迁到 ~/.traceforce/runs/，仓库根目录不再保留 runs/
-workspace/
+/workspace/
 !workspace/.gitkeep
 
 # 编辑器

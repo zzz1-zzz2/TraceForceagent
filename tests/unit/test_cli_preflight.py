@@ -48,6 +48,24 @@ def test_check_with_env_file_passes_preflight(
         assert name in result.stdout
 
 
+def test_check_with_env_file_defaults_to_current_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    env_file = tmp_path / "traceforce.env"
+    env_file.write_text("DEEPSEEK_API_KEY=clean-key\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["--env-file", str(env_file), "check"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert f"workspace · {tmp_path}" in result.stdout
+    assert "./workspace" not in result.stdout
+
+
 def test_check_fails_when_rg_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
