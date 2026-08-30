@@ -56,6 +56,19 @@ async def test_app_mounts_fixed_chrome_and_welcome(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("width", [60, 80, 120, 160])
+async def test_fixed_chrome_fits_supported_terminal_widths(tmp_path: Path, width: int) -> None:
+    app = CodingAgentApp(workspace=tmp_path)
+    async with app.run_test(size=(width, 30)) as pilot:
+        await pilot.pause()
+        for selector in ("#brand_bar", "#run_status", "#composer", "#footer_meta"):
+            region = app.query_one(selector).region
+            assert region.x >= 0
+            assert region.x + region.width <= width
+        assert app.query_one(Input).region.width > 0
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_events_create_and_reuse_component_cards(tmp_path: Path) -> None:
     app = CodingAgentApp(workspace=tmp_path)
     async with app.run_test() as pilot:

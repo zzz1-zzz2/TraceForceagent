@@ -14,6 +14,7 @@ from coding_agent.tui.widgets import (
     BrandBarWidget,
     FinalResultWidget,
     ToolExecutionWidget,
+    WelcomeWidget,
     _clean_text,
     _preview,
     tool_title,
@@ -184,6 +185,16 @@ def test_tool_widget_expansion_is_local_and_survives_state_updates() -> None:
 def test_brand_widget_accepts_workspace_path() -> None:
     widget = BrandBarWidget(Path("/tmp/workspace"))
     assert widget.workspace == Path("/tmp/workspace")
+
+
+def test_welcome_widget_exposes_static_pixel_cat_forms() -> None:
+    widget = WelcomeWidget(Path("/tmp/workspace"))
+    widget.render_welcome()
+    content = cast(str, widget._Static__content)  # type: ignore[attr-defined]
+    assert widget.STANDARD_CAT in content
+    assert "TraceForce · Visual Demo" in content
+    assert widget.MINI_CAT == "=^.^="
+    assert widget.ASCII_CAT
 
 
 # --- P2-1C.3.1 Tool UI hardening ---------------------------------------------
