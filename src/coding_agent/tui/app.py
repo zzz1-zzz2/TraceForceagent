@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import monotonic
 
 from textual.app import App, ComposeResult
 from textual.events import Key
@@ -60,6 +61,7 @@ class CodingAgentApp(App):
 
     TITLE = "TraceForce Agent"
     SUB_TITLE = f"v{__version__}"
+    CANCEL_EXIT_GUARD_SECONDS = 0.4
 
     def __init__(self, workspace: Path | None = None) -> None:
         super().__init__()
@@ -67,6 +69,7 @@ class CodingAgentApp(App):
         self._session: AgentSession = AgentSession(workspace=self._workspace)
         self._ui_state: RunUiState = initial_ui_state()
         self._worker: AgentWorker | None = None
+        self._cancel_requested_at: float | None = None
         self._welcome: WelcomeWidget | None = None
         self._assistant_widgets: dict[tuple[str, int], AssistantMessageWidget] = {}
         self._tool_widgets: dict[tuple[str, str], ToolExecutionWidget] = {}
@@ -249,6 +252,7 @@ class CodingAgentApp(App):
             return
 
         self._ui_state = initial_ui_state()
+        self._cancel_requested_at = None
         self.query_one("#input", Input).disabled = True
         self._worker = AgentWorker(
             self,
@@ -400,19 +404,33 @@ class CodingAgentApp(App):
         state, then re-enables the composer Input and refocuses it.
         """
         self._worker = None
+        self._cancel_requested_at = None
         input_widget = self.query_one("#input", Input)
         input_widget.disabled = False
         input_widget.focus()
 
+    def _cancel_exit_guard_active(self) -> bool:
+        """Whether a recent cancellation request should absorb key repeats."""
+        requested_at = self._cancel_requested_at
+        return (
+            requested_at is not None
+            and monotonic() - requested_at < self.CANCEL_EXIT_GUARD_SECONDS
+        )
+
     def action_quit_or_cancel(self) -> None:
-        """Cancel an active run once; quit if idle or already cancelling."""
+        """Cancel once, then exit only after an explicit later keypress."""
         if self._worker is None or not self._worker.is_alive:
+            if self._cancel_exit_guard_active():
+                return
             self.exit()
             return
         if self._worker.cancellation_token.is_cancelled:
+            if self._cancel_exit_guard_active():
+                return
             self.exit()
             return
         if self._worker.cancel():
+            self._cancel_requested_at = monotonic()
             self._status().update("• cancelling…")
 
     def action_clear_log(self) -> None:
