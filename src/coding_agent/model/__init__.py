@@ -2,6 +2,7 @@
 
 from coding_agent.model.client import ModelClient
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
+from coding_agent.model.streaming import ModelStreamAccumulator, ModelStreamDelta
 from coding_agent.model.types import (
     AgentAction,
     AssistantReplyAction,
@@ -28,4 +29,6 @@ __all__ = [
     "ToolResult",
     "Observation",
     "OpenAICompatibleParser",
+    "ModelStreamAccumulator",
+    "ModelStreamDelta",
 ]

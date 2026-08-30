@@ -9,10 +9,10 @@ materials under `docs/archive/` are historical reference only.
 
 | State | Value |
 | --- | --- |
-| Current baseline | `main @ d6baaed` |
-| Test baseline | `432 passed` |
+| Current baseline | `main @ a52fca9` |
+| Test baseline | `437 passed` |
 | Current milestone | **MVP4 Visual Demo** |
-| Active card | MVP4.1 Visual Foundation |
+| Active card | MVP4.2 Model Streaming Core |
 | Target release | `v0.1.0-alpha.1` |
 | Platforms | Ubuntu 22.04 / 24.04, WSL2 — Python 3.11 / 3.12 |
 
@@ -50,12 +50,18 @@ materials under `docs/archive/` are historical reference only.
   the later deliberate press exits after the repeat guard window.
 - Merged to `main` in PR #7; baseline is `main @ d6baaed` with `432 passed`.
 
+### MVP4.1 — Visual Foundation ✅
+
+- Shipped the TraceForce palette, cyan brand treatment, pixel-cat welcome,
+  responsive 60/80/120/160-column chrome, and compact tool surfaces.
+- Merged to `main` in PR #8; baseline is `main @ a52fca9` with `437 passed`.
+
 ## Upcoming milestones
 
 | Milestone | State | User-visible outcome |
 | --- | --- | --- |
-| MVP4.1 Visual Foundation | ⏳ | A calm, compact, recognizable TraceForce TUI at terminal widths from 60 to 160 columns. |
-| MVP4.2 Model Streaming Core | ⬜ | Assistant output can arrive incrementally through a typed streaming event contract. |
+| MVP4.1 Visual Foundation | ✅ | A calm, compact, recognizable TraceForce TUI at terminal widths from 60 to 160 columns. |
+| MVP4.2 Model Streaming Core | 🚧 | Assistant output can arrive incrementally through a typed streaming event contract. |
 | MVP4.3 Streaming TUI | ⬜ | The TUI renders incremental assistant output without breaking transcript or terminal state. |
 | MVP4.4 Shell Streaming + Process Cancel | ⬜ | Shell output is visible while running and a process group can be cooperatively terminated. |
 | MVP4.5 Final Visual Polish | ⬜ | Status transitions, tool surfaces, and welcome treatment are visually consistent. |
@@ -228,4 +234,6 @@ These remain deliberately outside the current MVP4 cards:
 - **MVP3** — shipped cooperative run cancellation.
 - **MVP4.0** — shipped cancellation hardening in PR #7; `main @ d6baaed`,
   `432 passed`.
-- **MVP4.1** — visual foundation specification frozen; implementation next.
+- **MVP4.1** — visual foundation specification frozen and shipped in PR #8;
+  `main @ a52fca9`, `437 passed`.
+- **MVP4.2** — model streaming core is the active card; implementation in progress.
