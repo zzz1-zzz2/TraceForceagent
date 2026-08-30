@@ -9,12 +9,21 @@ materials under `docs/archive/` are historical reference only.
 
 | State | Value |
 | --- | --- |
-| Current baseline | `main @ 9f8304a` |
+| Current baseline | `main @ 3cb82b6` |
 | Test baseline | `483 passed` |
-| Current milestone | **MVP4 Visual Demo** |
-| Active card | **MVP4.4.1 Runtime Hardening** |
+| Current milestone | **MVP4-R Portable Alpha** |
+| Active card | **MVP4-R Portable Alpha** |
 | Target release | `v0.1.0-alpha.1` |
 | Platforms | Ubuntu 22.04 / 24.04, WSL2 — Python 3.11 / 3.12 |
+
+## MVP4-R0 audit record
+
+The MVP4-R0 repository audit is recorded in
+[`docs/mvp4-r0-audit.md`](mvp4-r0-audit.md). The audit confirms the shipped
+MVP4.4.1 baseline, the successful GitHub Actions run, the initial Portable
+Alpha support boundary, dependency and sensitive-file findings, and a
+follow-up cleanup list. R0 records cleanup work without deleting archived
+materials or rewriting the README.
 
 ## Product goal
 
