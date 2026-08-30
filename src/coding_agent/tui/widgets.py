@@ -8,7 +8,7 @@ from typing import Any
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Click, Key
+from textual.events import Click, Key, Resize
 from textual.widget import Widget
 from textual.widgets import Input, Markdown, Static
 
@@ -37,6 +37,14 @@ def _path(arguments: Mapping[str, object]) -> str:
     return str(arguments.get("path") or arguments.get("cwd") or ".")
 
 
+def _compact_path(path: Path, *, width: int = 36) -> str:
+    """Keep fixed chrome readable when the terminal is narrow."""
+    value = str(path)
+    if len(value) <= width:
+        return value
+    return f"…/{path.name}" if path.name else "…"
+
+
 def tool_title(state: ToolUiState) -> str:
     """Return the presenter-generated compact tool title."""
     return present_tool(state).title
@@ -57,7 +65,7 @@ class BrandBarWidget(Static):
         self.render_brand()
 
     def render_brand(self) -> None:
-        self.update(f"TraceForce · v{__version__} · {_clean_text(self.workspace)}")
+        self.update(f"TraceForce · v{__version__} · {_compact_path(self.workspace)}")
 
 
 class TranscriptView(VerticalScroll):
@@ -75,7 +83,11 @@ class TranscriptView(VerticalScroll):
 
 
 class WelcomeWidget(Static):
-    """Compact initial prompt that yields to transcript entries."""
+    """Product welcome panel with static responsive Pixel Cat forms."""
+
+    STANDARD_CAT = " /\\_/\\\\\n( o.o )\n > ^ <"
+    MINI_CAT = "=^.^="
+    ASCII_CAT = " /\\_/\\\\\n( -.- )\n  > <"
 
     def __init__(self, workspace: Path, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -84,15 +96,23 @@ class WelcomeWidget(Static):
     def on_mount(self) -> None:
         self.render_welcome()
 
+    def on_resize(self, event: Resize) -> None:
+        if event.size.width <= 70:
+            self.render_welcome(cat=self.MINI_CAT)
+        else:
+            self.render_welcome()
+
     def set_workspace(self, workspace: Path) -> None:
         self.workspace = workspace
         self.render_welcome()
 
-    def render_welcome(self) -> None:
+    def render_welcome(self, *, cat: str | None = None) -> None:
         self.update(
-            "TraceForce\n"
-            f"workspace  {_clean_text(self.workspace)}\n"
-            "Enter a task to inspect, change, and validate this workspace."
+            f"{cat or self.STANDARD_CAT}\n"
+            "\nTraceForce · Visual Demo\n"
+            f"workspace  {_compact_path(self.workspace)}\n"
+            "inspect · edit · validate\n"
+            "Type a task to begin."
         )
 
 
@@ -311,7 +331,7 @@ class ComposerBarWidget(Horizontal):
 
     def compose(self) -> ComposeResult:
         yield Input(
-            placeholder="Describe a coding task or use /chat <message>",
+            placeholder="Describe a task for TraceForce…",
             id="input",
         )
 
@@ -332,12 +352,11 @@ class FooterMetaWidget(Static):
 
     def apply_state(self, state: RunUiState) -> None:
         self.update(
-            f"{_clean_text(self.workspace)} · {state.model or 'model'} · "
-            f"{state.total_tokens:,} tokens · Ctrl+L clear · Ctrl+C quit"
+            f"{state.model or 'model'} · {state.total_tokens:,} tokens · Ctrl+L clear · Ctrl+C quit"
         )
 
     def render_footer(self) -> None:
-        self.update(f"{_clean_text(self.workspace)} · Ctrl+L clear · Ctrl+C quit")
+        self.update("TraceForce · Ctrl+L clear · Ctrl+C quit")
 
 
 __all__ = [

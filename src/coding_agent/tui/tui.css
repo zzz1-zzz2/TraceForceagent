@@ -1,83 +1,84 @@
+/* MVP4.1 Visual Foundation palette: one quiet dark system. */
 Screen {
-    background: #18181e;
-    color: #d4d4d4;
+    background: #17181D;
+    color: #E6E7EB;
 }
 
 #brand_bar {
     height: 1;
-    background: #222229;
-    color: #67ddea;
+    background: #202229;
+    color: #5ED7E5;
     padding: 0 2;
     text-style: bold;
 }
 
 #transcript {
     height: 1fr;
-    background: #18181e;
+    background: #17181D;
     padding: 1 2;
-    scrollbar-background: #18181e;
-    scrollbar-color: #3a3a46;
+    scrollbar-background: #17181D;
+    scrollbar-color: #343844;
 }
 
 #welcome {
-    background: #222229;
-    color: #a78bfa;
+    background: #202229;
+    color: #E6E7EB;
     padding: 1 2;
     margin: 1 0;
-    border-left: tall #67ddea;
+    border-left: tall #5ED7E5;
 }
 
 .task, .chat {
-    background: #292934;
-    color: #d4d4d4;
+    background: #202229;
+    color: #E6E7EB;
     padding: 0 1;
     margin: 1 0;
-    border-left: tall #67ddea;
+    border-left: tall #5ED7E5;
 }
 
 Vertical.assistant-message {
-    color: #d4d4d4;
+    color: #E6E7EB;
     margin: 1 0;
 }
 
 .tool-execution {
-    background: #242733;
-    color: #d4d4d4;
+    background: #202229;
+    color: #A6AAB5;
     padding: 0 1;
     margin: 1 0;
-    border-left: tall #67ddea;
+    border-left: tall #343844;
 }
 
-.tool-execution:focus {
-    background: #2a2d3a;
-    border-left: tall #67ddea;
-}
-
-.tool-execution.expanded {
-    background: #252833;
+.tool-execution:focus, .tool-execution.expanded {
+    background: #272A33;
 }
 
 .tool-execution.success, .passed {
-    border-left: tall #8fbf73;
+    border-left: tall #86C978;
 }
 
 .tool-execution.error, .failed, .error {
-    border-left: tall #f48771;
+    border-left: tall #F07B72;
+}
+
+.tool-execution.cancelled {
+    border-left: tall #D6B86C;
 }
 
 .feedback {
-    color: #d7ba7d;
+    color: #D6B86C;
     margin: 1 0;
 }
 
 #run_status {
     height: 1;
-    background: #222229;
-    color: #67ddea;
+    background: #202229;
+    color: #5ED7E5;
     padding: 0 2;
 }
 
 #composer {
+    width: 1fr;
     height: 3;
     margin: 0 2 1 2;
 }
@@ -85,27 +86,27 @@ Vertical.assistant-message {
 #input {
     width: 1fr;
     height: 3;
-    background: #222229;
-    color: #d4d4d4;
-    border: tall #3a3a46;
+    background: #202229;
+    color: #E6E7EB;
+    border: tall #343844;
 }
 
 #input:focus {
-    border: tall #67ddea;
+    border: tall #5ED7E5;
 }
 
 #footer_meta {
     height: 1;
-    background: #222229;
-    color: #808087;
+    background: #202229;
+    color: #717684;
     padding: 0 2;
 }
 
 Markdown {
     background: transparent;
-    color: #d4d4d4;
+    color: #E6E7EB;
 }
 
 Static {
-    color: #d4d4d4;
+    color: #E6E7EB;
 }
