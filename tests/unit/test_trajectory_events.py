@@ -10,6 +10,7 @@ from coding_agent.emitter import CriticalEventDeliveryError, EventCollector, Eve
 from coding_agent.events import (
     AssistantReplied,
     FinishAccepted,
+    ModelDelta,
     RunCancelled,
     RunFinished,
     RunStarted,
@@ -148,7 +149,26 @@ def test_trajectory_sink_writes_one_record_per_event(tmp_path):
     assert len(collector.events) == 1
 
 
-def test_critical_sink_failure_runs_siblings_and_marks_sink_unhealthy():
+def test_trajectory_sink_excludes_transient_deltas_but_keeps_observer_stream(tmp_path):
+    logger = TrajectoryLogger("r", tmp_path / "workspace", tmp_path / "trace")
+    sink = TrajectoryEventSink(logger)
+    emitter = EventEmitter()
+    emitter.subscribe(sink, critical=True)
+    collector = EventCollector()
+    emitter.subscribe(collector)
+
+    for index in range(1000):
+        emitter.emit(ModelDelta(run_id="r", turn=1, text=f"fragment-{index}"))
+    emitter.emit(FinishAccepted(run_id="r", summary="done"))
+    sink.close()
+
+    assert sum(isinstance(event, ModelDelta) for event in collector.events) == 1000
+    records = [json.loads(line) for line in sink.path.read_text().splitlines() if line]
+    assert len(records) == 1
+    assert records[0]["event_type"] == "finish_accepted"
+    assert records[0]["sequence"] == 1001
+
+
     seen = []
 
     def broken(_event):

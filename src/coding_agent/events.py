@@ -274,8 +274,11 @@ class ModelStarted(BaseEvent):
 class ModelDelta(BaseEvent):
     """Transient increment emitted while a model response is streaming.
 
-    Deltas are observable UI facts, not session history.  The complete response
-    remains the durable boundary represented by :class:`ModelCompleted`.
+    ``text`` is only the new fragment from this event. Deltas are observable
+    UI facts, not session history; the complete response remains the durable
+    boundary represented by :class:`ModelCompleted`. ``accumulated_text`` is
+    retained as a deprecated construction-compatibility field and is normally
+    empty; consumers must accumulate ``text`` locally.
     """
 
     event_type: ClassVar[str] = "model_delta"

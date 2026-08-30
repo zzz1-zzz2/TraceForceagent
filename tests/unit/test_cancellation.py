@@ -12,7 +12,7 @@ from coding_agent.agent.cancellation import CancellationRequested, CancellationT
 from coding_agent.agent.loop import run
 from coding_agent.config import AgentConfig
 from coding_agent.emitter import EventCollector, EventEmitter
-from coding_agent.events import RunCancelled, RunStarted, ValidationCompleted
+from coding_agent.events import ModelDelta, RunCancelled, RunStarted, TurnEnded, ValidationCompleted
 from coding_agent.model.client import ModelClient
 from coding_agent.model.types import ModelResponse, TokenUsage, ToolCall, ToolResult
 from coding_agent.session import AgentSession
@@ -222,7 +222,52 @@ def test_cancel_after_validation_classification_preserves_validation_fact(
     assert trajectory_types.index("validation_completed") < trajectory_types.index("run_cancelled")
 
 
-def test_cancelled_session_can_continue_next_run(tmp_path: Path, monkeypatch) -> None:
+def test_streaming_cancel_does_not_emit_model_or_run_failure(tmp_path: Path, monkeypatch) -> None:
+    token = CancellationToken()
+
+    class StreamingModel:
+        model = "fake"
+        supports_streaming = True
+
+        def generate_stream(self, messages, tools=None):
+            yield ModelStreamDelta(text="partial")
+            token.cancel()
+            yield ModelStreamDelta(text="never-visible")
+
+    from coding_agent.model.streaming import ModelStreamDelta
+
+    monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: StreamingModel()))
+    collector = EventCollector()
+    emitter = EventEmitter()
+    emitter.subscribe(collector)
+    result = run(
+        "stream and cancel",
+        tmp_path,
+        _config(tmp_path),
+        emitter=emitter,
+        cancellation_token=token,
+    )
+
+    event_types = [event.event_type for event in collector.events]
+    assert result.stop_reason == "cancelled"
+    assert [event.text for event in collector.events if isinstance(event, ModelDelta)] == ["partial"]
+    assert "model_failed" not in event_types
+    assert "run_failed" not in event_types
+    assert not any(
+        isinstance(event, TurnEnded) and event.status == "error"
+        for event in collector.events
+    )
+    assert event_types[-1] == "run_cancelled"
+    assert result.trajectory_path is not None
+    records = [
+        json.loads(line)
+        for line in result.trajectory_path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    assert all(record["event_type"] != "model_delta" for record in records)
+    assert records[-1]["event_type"] == "run_cancelled"
+
+
     token = CancellationToken()
 
     class CancelModel:

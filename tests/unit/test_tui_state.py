@@ -8,6 +8,7 @@ from coding_agent.events import (
     AssistantReplied,
     FinishAccepted,
     ModelCompleted,
+    ModelDelta,
     ModelResponseSnapshot,
     ModelStarted,
     RunCancelled,
@@ -356,7 +357,41 @@ def test_model_completed_strips_token_total_and_stores_assistant_text():
     assert state.output_tokens == 6
 
 
-def test_run_failed_marks_running_tools_as_error():
+def test_streaming_deltas_accumulate_locally_without_deduplication():
+    state = reduce_event(initial_ui_state(), _started("run-1", sequence=1))
+    state = reduce_event(state, ModelDelta(run_id="run-1", sequence=2, turn=1, text="x"))
+    state = reduce_event(state, ModelDelta(run_id="run-1", sequence=3, turn=1, text="x"))
+
+    assert state.assistant_draft == "xx"
+    assert state.assistant_messages == ("xx",)
+
+
+def test_model_completed_replaces_streaming_draft_and_reply_does_not_duplicate():
+    state = reduce_event(initial_ui_state(), _started("run-1", sequence=1))
+    state = reduce_event(state, ModelDelta(run_id="run-1", sequence=2, turn=1, text="partial"))
+    state = reduce_event(state, _model_completed("run-1", sequence=3, turn=1, content="complete"))
+    state = reduce_event(state, AssistantReplied(
+        run_id="run-1",
+        sequence=4,
+        turn=1,
+        text="complete",
+        final_state=RunStateSnapshot(status="COMPLETED", reason="assistant_reply"),
+    ))
+
+    assert state.assistant_messages == ("complete",)
+    assert state.assistant_draft == ""
+
+
+def test_streaming_draft_is_isolated_between_turns():
+    state = reduce_event(initial_ui_state(), _started("run-1", sequence=1))
+    state = reduce_event(state, ModelDelta(run_id="run-1", sequence=2, turn=1, text="first"))
+    state = reduce_event(state, ModelDelta(run_id="run-1", sequence=3, turn=2, text="second"))
+
+    assert state.assistant_messages == ("first", "second")
+    assert state.assistant_draft == "second"
+    assert state.assistant_draft_turn == 2
+
+
     state = reduce_event(initial_ui_state(), _started("run-1", sequence=1))
     state = reduce_event(state, _tool_started("run-1", sequence=2, action_id="a1"))
     state = reduce_event(state, _tool_started("run-1", sequence=3, action_id="a2"))

@@ -7,6 +7,7 @@ from time import monotonic
 
 from textual.app import App, ComposeResult
 from textual.events import Key
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Input
 
@@ -53,6 +54,8 @@ from coding_agent.tui.widgets import (
 class CodingAgentApp(App):
     """TraceForce TUI with a stable transcript and fixed status area."""
 
+    STREAM_RENDER_INTERVAL = 0.04
+
     CSS_PATH = "tui.css"
     BINDINGS = [
         ("ctrl+c", "quit_or_cancel", "Cancel / quit"),
@@ -73,6 +76,8 @@ class CodingAgentApp(App):
         self._cancel_requested_at: float | None = None
         self._welcome: WelcomeWidget | None = None
         self._assistant_widgets: dict[tuple[str, int], AssistantMessageWidget] = {}
+        self._pending_assistant_renders: dict[tuple[str, int], str] = {}
+        self._stream_render_timer: Timer | None = None
         self._tool_widgets: dict[tuple[str, str], ToolExecutionWidget] = {}
         self._validation_widgets: dict[tuple[str, int], ValidationWidget] = {}
         self._notice_widgets: dict[tuple[str, int], NoticeWidget] = {}
@@ -131,6 +136,34 @@ class CodingAgentApp(App):
     def _footer(self) -> FooterMetaWidget:
         return self.query_one("#footer_meta", FooterMetaWidget)
 
+    def _cancel_stream_render_timer(self) -> None:
+        if self._stream_render_timer is not None:
+            self._stream_render_timer.stop()
+            self._stream_render_timer = None
+
+    def _flush_pending_assistant_renders(
+        self, assistant_key: tuple[str, int] | None = None
+    ) -> None:
+        keys = (
+            [assistant_key]
+            if assistant_key is not None
+            else list(self._pending_assistant_renders)
+        )
+        for key in keys:
+            content = self._pending_assistant_renders.pop(key, None)
+            widget = self._assistant_widgets.get(key)
+            if content is not None and widget is not None:
+                widget.set_content(content)
+        if not self._pending_assistant_renders:
+            self._cancel_stream_render_timer()
+
+    def _schedule_stream_render(self) -> None:
+        if self._stream_render_timer is None:
+            self._stream_render_timer = self.set_timer(
+                self.STREAM_RENDER_INTERVAL,
+                self._flush_pending_assistant_renders,
+            )
+
     async def _append(self, widget: Widget) -> None:
         """Mount one transcript widget through the single transcript owner."""
         await self._transcript().append_entry(widget)
@@ -141,8 +174,10 @@ class CodingAgentApp(App):
         self._welcome = None
 
     async def _reset_transcript(self) -> None:
+        self._flush_pending_assistant_renders()
         await self._transcript().clear_entries()
         self._assistant_widgets.clear()
+        self._pending_assistant_renders.clear()
         self._tool_widgets.clear()
         self._validation_widgets.clear()
         self._notice_widgets.clear()
@@ -279,17 +314,22 @@ class CodingAgentApp(App):
 
     async def _apply_event_to_widgets(self, event: object) -> None:
         if isinstance(event, RunStarted):
+            self._flush_pending_assistant_renders()
             await self._hide_welcome()
         elif isinstance(event, ModelDelta):
             assistant_key = (event.run_id, event.turn)
             assistant_widget = self._assistant_widgets.get(assistant_key)
+            draft = self._ui_state.assistant_draft
             if assistant_widget is None:
-                assistant_widget = AssistantMessageWidget(event.accumulated_text)
+                assistant_widget = AssistantMessageWidget(draft)
                 self._assistant_widgets[assistant_key] = assistant_widget
                 await self._append(assistant_widget)
-            else:
-                assistant_widget.set_content(event.accumulated_text)
+            elif draft:
+                self._pending_assistant_renders[assistant_key] = draft
+                self._schedule_stream_render()
         elif isinstance(event, ModelCompleted):
+            assistant_key = (event.run_id, event.turn)
+            self._flush_pending_assistant_renders(assistant_key)
             response = event.response
             if response is not None and response.content.strip():
                 assistant_key = (event.run_id, event.turn)
@@ -299,16 +339,19 @@ class CodingAgentApp(App):
                     self._assistant_widgets[assistant_key] = assistant_widget
                     await self._append(assistant_widget)
                 else:
-                    assistant_widget.set_content(response.content)
+                    if assistant_widget.content != response.content:
+                        assistant_widget.set_content(response.content)
         elif isinstance(event, AssistantReplied):
             assistant_key = (event.run_id, event.turn)
+            self._flush_pending_assistant_renders(assistant_key)
             assistant_widget = self._assistant_widgets.get(assistant_key)
             if assistant_widget is None:
                 assistant_widget = AssistantMessageWidget(event.text)
                 self._assistant_widgets[assistant_key] = assistant_widget
                 await self._append(assistant_widget)
             else:
-                assistant_widget.set_content(event.text)
+                if assistant_widget.content != event.text:
+                    assistant_widget.set_content(event.text)
         elif isinstance(event, ToolStarted):
             tool_key = (event.run_id, event.action_id)
             tool_state = self._ui_state.tools.get(tool_key)
@@ -353,21 +396,24 @@ class CodingAgentApp(App):
         elif isinstance(event, ModelFailed):
             await self._append(NoticeWidget(event.error or event.error_type, level="error"))
         elif isinstance(event, FinishAccepted):
+            self._flush_pending_assistant_renders()
             await self._update_final(event.run_id)
-        elif isinstance(event, RunFinished):
-            await self._update_final(event.run_id)
-        elif isinstance(event, RunFailed):
-            for tool_key, tool_state in self._ui_state.tools.items():
-                tool_widget = self._tool_widgets.get(tool_key)
-                if tool_widget is not None:
-                    tool_widget.apply_state(tool_state)
-            await self._update_final(event.run_id)
-        elif isinstance(event, RunCancelled):
-            for tool_key, tool_state in self._ui_state.tools.items():
-                tool_widget = self._tool_widgets.get(tool_key)
-                if tool_widget is not None:
-                    tool_widget.apply_state(tool_state)
-            await self._update_final(event.run_id)
+        elif isinstance(event, (RunFinished, RunFailed, RunCancelled)):
+            self._flush_pending_assistant_renders()
+            if isinstance(event, RunFinished):
+                await self._update_final(event.run_id)
+            elif isinstance(event, RunFailed):
+                for tool_key, tool_state in self._ui_state.tools.items():
+                    tool_widget = self._tool_widgets.get(tool_key)
+                    if tool_widget is not None:
+                        tool_widget.apply_state(tool_state)
+                await self._update_final(event.run_id)
+            else:
+                for tool_key, tool_state in self._ui_state.tools.items():
+                    tool_widget = self._tool_widgets.get(tool_key)
+                    if tool_widget is not None:
+                        tool_widget.apply_state(tool_state)
+                await self._update_final(event.run_id)
 
         elif isinstance(event, (TurnStarted, TurnEnded)):
             return
@@ -413,6 +459,7 @@ class CodingAgentApp(App):
         Drops the worker reference so subsequent submissions see a clean
         state, then re-enables the composer Input and refocuses it.
         """
+        self._flush_pending_assistant_renders()
         self._worker = None
         self._cancel_requested_at = None
         input_widget = self.query_one("#input", Input)

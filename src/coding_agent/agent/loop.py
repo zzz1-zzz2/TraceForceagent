@@ -460,7 +460,6 @@ def _run_loop(
                             step=state.step_count,
                             model=model_name,
                             text=delta.text,
-                            accumulated_text=accumulator.content,
                             tool_call_index=delta.tool_call_index,
                             tool_call_id=delta.tool_call_id,
                             tool_name=delta.tool_name,
@@ -469,6 +468,9 @@ def _run_loop(
                     response = accumulator.finish()
                 else:
                     response = model_client.generate(messages=messages, tools=registry.schemas())
+            except CancellationRequested:
+                active_model = False
+                raise
             except Exception as exc:
                 events.emit(ModelFailed(
                     run_id=run_id,

@@ -14,9 +14,7 @@ P0-5 关键验收门：模型 → tool → 模型 → modify → test → finish
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -182,6 +180,62 @@ class TestHappyPath:
         assert fake.call_count == 5
 
 
+class TestGreenfieldSmoke:
+    """Verify a new non-Git directory can be built from scratch."""
+
+    def test_empty_non_git_workspace_can_create_validate_and_finish(self, tmp_path, patch_model):
+        workspace = tmp_path / "new-project"
+        workspace.mkdir()
+        fake = patch_model([
+            _resp(
+                "apply_patch",
+                {
+                    "path": "hello.py",
+                    "content": "def hello():\n    return 'hello'\n",
+                    "mode": "create",
+                },
+                call_id="green-c1",
+            ),
+            _resp(
+                "run_command",
+                {"command": f"{sys.executable} -m py_compile hello.py"},
+                call_id="green-c2",
+            ),
+            _finish(summary="Created and validated hello.py", validation="py_compile passed"),
+        ])
+        config = AgentConfig(
+            context_budget=8000,
+            recent_turns=4,
+            max_steps=10,
+            max_model_calls=10,
+            max_wall_time=30,
+            command_timeout=30,
+            workspace_root=workspace,
+            trace_root=tmp_path / "trace",
+        )
+
+        result = agent_run(
+            task="Create a new Python CLI project from scratch",
+            workspace=workspace,
+            config=config,
+        )
+
+        assert result.stop_reason == "finish"
+        assert (workspace / "hello.py").exists()
+        assert fake.call_count == 3
+        assert result.final_state is not None
+        assert result.final_state.status == "COMPLETED"
+        assert result.trajectory_path is not None
+        events = [json.loads(line) for line in result.trajectory_path.read_text().splitlines() if line]
+        event_types = [event["event_type"] for event in events]
+        assert "model_delta" not in event_types
+        assert "model_completed" in event_types
+        assert "tool_completed" in event_types
+        assert "validation_completed" in event_types
+        assert "finish_accepted" in event_types
+        assert event_types[-1] == "run_finished"
+
+
 class TestFinishPolicyRejection:
     """FinishPolicy 在端到端流程中的拒绝路径。"""
 
@@ -189,7 +243,7 @@ class TestFinishPolicyRejection:
         self, fake_workspace, config, patch_model
     ):
         """只 list_files 不修改就调 finish → reject，最终非 finish 终止。"""
-        fake = patch_model([
+        patch_model([
             _resp("list_files", {"path": ".", "max_depth": 1}, call_id="c1"),
             _finish(summary="nothing changed"),
             _finish(summary="really nothing"),
@@ -218,7 +272,7 @@ class TestFinishPolicyRejection:
             "def test_fail():\n    assert 1 == 2\n"
         )
 
-        fake = patch_model([
+        patch_model([
             _resp("apply_patch", {
                 "path": "broken.py",
                 "content": "x = 1/0\n",
@@ -252,7 +306,7 @@ class TestIntegrationRealWorld:
         self, fake_workspace, config, patch_model
     ):
         """state.modified_files 必须精确反映实际修改的文件。"""
-        fake = patch_model([
+        patch_model([
             _resp("apply_patch", {
                 "path": "a.py", "content": "a = 1\n", "mode": "create",
             }, call_id="c1"),
@@ -284,7 +338,7 @@ class TestIntegrationRealWorld:
         self, fake_workspace, config, patch_model
     ):
         """验证 model 收到的 messages 包含真实工具输出（不只是 fake 框架）。"""
-        fake = patch_model([
+        patch_model([
             _resp("read_file", {"path": "tests/test_smoke.py"}, call_id="c1"),
             _resp("apply_patch", {
                 "path": "added.py", "content": "x = 1\n", "mode": "create",

@@ -114,11 +114,19 @@ def test_agent_loop_emits_transient_deltas_before_durable_completion(monkeypatch
     assert result.reply == "hello world"
     deltas = [event for event in collector.events if isinstance(event, ModelDelta)]
     completed = [event for event in collector.events if isinstance(event, ModelCompleted)]
-    assert [event.accumulated_text for event in deltas] == ["hello", "hello world"]
+    assert [event.text for event in deltas] == ["hello", " world"]
+    assert all(event.accumulated_text == "" for event in deltas)
     assert completed and completed[0].response.content == "hello world"
     assert collector.events.index(deltas[-1]) < collector.events.index(completed[0])
 
 
-def test_model_stream_delta_rejects_negative_call_index() -> None:
+def test_streaming_duplicate_fragments_are_preserved() -> None:
+    accumulator = ModelStreamAccumulator()
+    accumulator.add(ModelStreamDelta(text="same"))
+    accumulator.add(ModelStreamDelta(text="same"))
+
+    assert accumulator.finish().content == "samesame"
+
+
     with pytest.raises(ValueError, match="negative"):
         ModelStreamDelta(tool_call_index=-1)

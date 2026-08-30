@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from coding_agent.events import AgentEvent
+from coding_agent.events import AgentEvent, ModelDelta
 from coding_agent.trajectory.logger import TrajectoryLogger
 
 SCHEMA_VERSION = 2
@@ -123,7 +123,11 @@ def _legacy_terminal_fields(final: dict[str, Any]) -> dict[str, Any]:
 
 
 class TrajectoryEventSink:
-    """Critical synchronous subscriber that persists every lifecycle event."""
+    """Critical sink that persists durable lifecycle events.
+
+    ``ModelDelta`` remains available to observers but is transient UI data and
+    is intentionally excluded from the on-disk trajectory.
+    """
 
     critical = True
 
@@ -135,6 +139,8 @@ class TrajectoryEventSink:
         return self.logger.path
 
     def __call__(self, event: AgentEvent) -> None:
+        if isinstance(event, ModelDelta):
+            return
         record = event_to_record(event)
         self.logger.write_record(record)
 

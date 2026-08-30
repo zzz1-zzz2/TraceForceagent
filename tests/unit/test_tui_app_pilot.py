@@ -14,6 +14,7 @@ from coding_agent.events import (
     AssistantReplied,
     FinishAccepted,
     ModelCompleted,
+    ModelDelta,
     ModelResponseSnapshot,
     RunCancelled,
     RunFailed,
@@ -117,6 +118,60 @@ async def test_lifecycle_events_create_and_reuse_component_cards(tmp_path: Path)
         assert app.query_one(ToolExecutionWidget) is tool
         assert tool.state.status is ToolUiStatus.ERROR
         await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_streaming_assistant_updates_are_throttled_and_flushed_by_final_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = CodingAgentApp(workspace=tmp_path)
+    async with app.run_test() as pilot:
+        await _post(app, pilot, RunStarted(run_id="run-1", sequence=1))
+        await _post(app, pilot, ModelDelta(
+            run_id="run-1", sequence=2, turn=1, step=1, model="fake", text="hello"
+        ))
+        widget = app.query_one(AssistantMessageWidget)
+        updates: list[str] = []
+        original_set_content = widget.set_content
+
+        def observe(content: str) -> None:
+            updates.append(content)
+            original_set_content(content)
+
+        widget.set_content = observe  # type: ignore[method-assign]
+
+        class TimerStub:
+            def stop(self) -> None:
+                pass
+
+        scheduled: list[tuple[float, object]] = []
+
+        def set_timer(delay: float, callback: object) -> TimerStub:
+            scheduled.append((delay, callback))
+            return TimerStub()
+
+        monkeypatch.setattr(app, "set_timer", set_timer)
+        await _post(app, pilot, ModelDelta(
+            run_id="run-1", sequence=3, turn=1, step=1, model="fake", text=" world"
+        ))
+        await _post(app, pilot, ModelDelta(
+            run_id="run-1", sequence=4, turn=1, step=1, model="fake", text="!"
+        ))
+        assert scheduled == [(app.STREAM_RENDER_INTERVAL, app._flush_pending_assistant_renders)]
+        assert updates == []
+        assert app._ui_state.assistant_draft == "hello world!"
+
+        await _post(app, pilot, ModelCompleted(
+            run_id="run-1",
+            sequence=5,
+            turn=1,
+            step=1,
+            model="fake",
+            response=ModelResponseSnapshot(content="hello world!"),
+        ))
+        assert updates == ["hello world!"]
+        assert widget.content == "hello world!"
 
 
 @pytest.mark.asyncio

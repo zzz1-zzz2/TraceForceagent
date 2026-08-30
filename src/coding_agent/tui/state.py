@@ -106,6 +106,8 @@ class RunUiState:
     validation: ValidationUiState | None = None
     feedback: tuple[str, ...] = ()
     assistant_messages: tuple[str, ...] = ()
+    assistant_draft: str = ""
+    assistant_draft_turn: int | None = None
     finish_accepted: bool = False
     final_summary: str = ""
     final_validation: str = ""
@@ -174,6 +176,8 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             validation=None,
             feedback=(),
             assistant_messages=(),
+            assistant_draft="",
+            assistant_draft_turn=None,
             finish_accepted=False,
             final_summary="",
             final_validation="",
@@ -197,11 +201,15 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
         )
 
     if isinstance(event, ModelDelta):
+        draft = event.text
+        if state.assistant_draft_turn == event.turn:
+            draft = state.assistant_draft + event.text
         assistant_messages = state.assistant_messages
-        if assistant_messages:
-            assistant_messages = (*assistant_messages[:-1], event.accumulated_text)
-        elif event.accumulated_text:
-            assistant_messages = (event.accumulated_text,)
+        if draft:
+            if state.assistant_draft_turn == event.turn and assistant_messages:
+                assistant_messages = (*assistant_messages[:-1], draft)
+            else:
+                assistant_messages = (*assistant_messages, draft)
         return replace(
             state,
             phase="thinking",
@@ -210,14 +218,20 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             model=event.model or state.model,
             model_running=True,
             assistant_messages=assistant_messages,
+            assistant_draft=draft,
+            assistant_draft_turn=event.turn,
         )
 
     if isinstance(event, ModelCompleted):
         response = event.response
         content = response.content if response is not None else ""
         assistant_messages = state.assistant_messages
+        is_current_draft = state.assistant_draft_turn == event.turn
         if content.strip():
-            assistant_messages = (*assistant_messages, content)
+            if is_current_draft and assistant_messages:
+                assistant_messages = (*assistant_messages[:-1], content)
+            else:
+                assistant_messages = (*assistant_messages, content)
         return replace(
             state,
             phase="thinking",
@@ -231,6 +245,8 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
                 (response.input_tokens + response.output_tokens) if response else 0
             ),
             assistant_messages=assistant_messages,
+            assistant_draft="",
+            assistant_draft_turn=event.turn if is_current_draft else state.assistant_draft_turn,
         )
 
     if isinstance(event, ModelFailed):
@@ -281,12 +297,20 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
 
     if isinstance(event, AssistantReplied):
         final = event.final_state
+        assistant_messages = state.assistant_messages
+        if event.text.strip():
+            if state.assistant_draft_turn == event.turn and assistant_messages:
+                assistant_messages = (*assistant_messages[:-1], event.text)
+            else:
+                assistant_messages = (*assistant_messages, event.text)
         return replace(
             state,
             phase="answered",
             turn=event.turn,
             step=event.step,
-            assistant_messages=(*state.assistant_messages, event.text),
+            assistant_messages=assistant_messages,
+            assistant_draft="",
+            assistant_draft_turn=event.turn,
             terminal_status=final.status,
             terminal_reason=final.reason,
             final_summary=final.summary,
