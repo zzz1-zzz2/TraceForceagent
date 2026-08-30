@@ -1,8 +1,9 @@
 [project]
-name = "coding-agent"
-version = "0.1.0"
-description = "A lightweight single-agent coding agent implemented from scratch"
-authors = [{ name = "Your Name" }]
+name = "traceforce-agent"
+version = "0.1.0a1"
+description = "A recovery-oriented single-agent coding agent for Linux"
+authors = [{ name = "zzz1-zzz2" }]
+license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.11"
 
@@ -25,15 +26,14 @@ dependencies = [
     # Token 估算
     "tiktoken>=0.7.0",
 
-    # 日志
-    "structlog>=24.1.0",
-
     # TUI
     "textual>=0.60.0",
-
-    # 其它工具
-    "pyyaml>=6.0.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/zzz1-zzz2/TraceForceagent"
+Repository = "https://github.com/zzz1-zzz2/TraceForceagent"
+Issues = "https://github.com/zzz1-zzz2/TraceForceagent/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -45,6 +45,9 @@ dev = [
 ]
 
 [project.scripts]
+tracef = "coding_agent.cli:app"
+traceF = "coding_agent.cli:app"
+traceforce = "coding_agent.cli:app"
 coding-agent = "coding_agent.cli:app"
 
 [build-system]

@@ -2,13 +2,13 @@
 
 Commands:
 
-* ``python -m coding_agent run --task "..." --workspace ./repo``
-* ``python -m coding_agent run --task-file task.md --workspace ./repo``
-* ``python -m coding_agent tui [--workspace DIR]``
-* ``python -m coding_agent check``
-* ``python -m coding_agent config-show``
-* ``python -m coding_agent config-path``
-* ``python -m coding_agent --help``
+* ``tracef run --task "..." --workspace ./repo``
+* ``tracef run --task-file task.md --workspace ./repo``
+* ``tracef tui [--workspace DIR]``
+* ``tracef check``
+* ``tracef config-show``
+* ``tracef config-path``
+* ``tracef --help``
 
 Global flags:
 
@@ -42,8 +42,8 @@ from coding_agent.config import (
 from coding_agent.model.client import MissingCredentialsError
 
 app = typer.Typer(
-    name="coding-agent",
-    help="Lightweight single-agent coding agent",
+    name="tracef",
+    help="Recovery-oriented single-agent coding agent",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -53,7 +53,7 @@ console = Console()
 
 def _version_callback(value: bool) -> None:
     if value:
-        console.print(f"coding-agent [bold cyan]{__version__}[/bold cyan]")
+        console.print(f"tracef [bold cyan]{__version__}[/bold cyan]")
         raise typer.Exit()
 
 
@@ -163,8 +163,8 @@ def run(
     task_file: Path | None = typer.Option(
         None, "--task-file", "-f", help="Load task from file"
     ),
-    workspace: Path = typer.Option(
-        "./workspace", "--workspace", "-w", help="Workspace directory"
+    workspace: Path | None = typer.Option(
+        None, "--workspace", "-w", help="Agent workspace (default: current directory)"
     ),
     base_url: str | None = typer.Option(
         None, "--base-url", help="Override the resolved base URL"
@@ -204,8 +204,9 @@ def run(
         console.print("[red]Must provide --task or --task-file[/red]")
         raise typer.Exit(1)
 
-    workspace.mkdir(parents=True, exist_ok=True)
-    config.workspace_root = workspace.resolve()
+    selected_workspace = (workspace or Path.cwd()).resolve()
+    selected_workspace.mkdir(parents=True, exist_ok=True)
+    config.workspace_root = selected_workspace
 
     if not config.api_key:
         _print_credentials_status(config)
@@ -262,8 +263,11 @@ def tui(
 @app.command()
 def check(
     ctx: typer.Context,
-    workspace: Path = typer.Option(
-        Path("./workspace"), "--workspace", "-w", help="Workspace directory"
+    workspace: Path | None = typer.Option(
+        None,
+        "--workspace",
+        "-w",
+        help="Workspace directory (default: current directory)",
     ),
 ) -> None:
     """Run the unified preflight (provider/model/url/key, workspace, git, rg)."""
@@ -272,7 +276,8 @@ def check(
 
     config = _resolve_config(env_file, provider)
     _print_credentials_status(config)
-    ok = _print_preflight(config, workspace=workspace)
+    selected_workspace = (workspace or Path.cwd()).resolve()
+    ok = _print_preflight(config, workspace=selected_workspace)
     if not ok:
         raise typer.Exit(1)
 

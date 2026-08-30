@@ -137,7 +137,7 @@ class CodingAgentApp(App):
             names = ", ".join(result.failing_names())
             await self._append(
                 NoticeWidget(
-                    f"preflight failed: {names} — see `coding-agent check`",
+                    f"preflight failed: {names} — see `tracef check`",
                     level="system",
                 )
             )
@@ -316,7 +316,7 @@ class CodingAgentApp(App):
             names = ", ".join(result.failing_names())
             await self._append(
                 NoticeWidget(
-                    f"preflight failed: {names}. Run `coding-agent check`.",
+                    f"preflight failed: {names}. Run `tracef check`.",
                     level="error",
                 )
             )

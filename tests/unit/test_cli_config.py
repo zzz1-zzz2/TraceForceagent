@@ -184,6 +184,34 @@ def test_run_requires_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "no API key resolved" in result.stdout
 
 
+def test_run_defaults_workspace_to_current_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.chdir(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_agent_run(**kwargs: object) -> object:
+        captured.update(kwargs)
+
+        class Result:
+            reply = ""
+            summary = "done"
+            stop_reason = "completed"
+            steps = 1
+            total_tokens = 0
+
+        return Result()
+
+    import coding_agent.agent.loop
+
+    monkeypatch.setattr(coding_agent.agent.loop, "run", fake_agent_run)
+    result = runner.invoke(app, ["run", "--task", "noop"])
+
+    assert result.exit_code == 0, result.stdout
+    assert captured["workspace"] == tmp_path.resolve()
+
+
 def test_run_requires_task_or_task_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
