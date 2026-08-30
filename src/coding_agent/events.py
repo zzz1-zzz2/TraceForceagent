@@ -134,6 +134,7 @@ class BaseEvent:
 @dataclass(frozen=True, kw_only=True)
 class RunStarted(BaseEvent):
     event_type: ClassVar[str] = "run_started"
+    session_id: str = ""
     task: str = ""
     workspace: str = ""
 
@@ -147,17 +148,22 @@ class RunStateSnapshot:
     summary: str = ""
     validation: str = ""
     validation_skipped_reason: str = ""
+    notes: str = ""
+    reply: str = ""
     steps: int = 0
     total_tokens: int = 0
     modified_files: tuple[str, ...] = ()
+    findings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "modified_files", tuple(self.modified_files))
+        object.__setattr__(self, "findings", tuple(self.findings))
 
 
 @dataclass(frozen=True, kw_only=True)
 class RunFinished(BaseEvent):
     event_type: ClassVar[str] = "run_finished"
+    session_id: str = ""
     final_state: RunStateSnapshot = RunStateSnapshot()
 
     @property
@@ -174,9 +180,27 @@ class RunFinished(BaseEvent):
 @dataclass(frozen=True, kw_only=True)
 class RunFailed(BaseEvent):
     event_type: ClassVar[str] = "run_failed"
+    session_id: str = ""
     error_type: str = ""
     error: str = ""
     final_state: RunStateSnapshot = RunStateSnapshot()
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunCancelled(BaseEvent):
+    """Published after a run's cancelled Session snapshot is committed."""
+
+    event_type: ClassVar[str] = "run_cancelled"
+    session_id: str = ""
+    final_state: RunStateSnapshot = RunStateSnapshot()
+
+    @property
+    def status(self) -> str:
+        return self.final_state.status
+
+    @property
+    def reason(self) -> str:
+        return self.final_state.reason
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -209,6 +233,21 @@ class ValidationCompleted(BaseEvent):
     passed: bool | None = None
     summary: str = ""
     is_runtime_error: bool = False
+
+
+@dataclass(frozen=True, kw_only=True)
+class AssistantReplied(BaseEvent):
+    """A complete assistant response that answers without tool execution."""
+
+    event_type: ClassVar[str] = "assistant_replied"
+    turn: int = 0
+    step: int = 0
+    text: str = ""
+    final_state: RunStateSnapshot = RunStateSnapshot()
+
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -314,8 +353,10 @@ AgentEvent: TypeAlias = (
     RunStarted
     | RunFinished
     | RunFailed
+    | RunCancelled
     | FeedbackRecorded
     | ValidationCompleted
+    | AssistantReplied
     | FinishAccepted
     | TurnStarted
     | TurnEnded
@@ -330,6 +371,7 @@ AgentEvent: TypeAlias = (
 __all__ = [
     "AgentEvent",
     "BaseEvent",
+    "AssistantReplied",
     "FeedbackRecorded",
     "FinishAccepted",
     "ModelCompleted",
@@ -337,6 +379,7 @@ __all__ = [
     "ModelResponseSnapshot",
     "ModelStarted",
     "RunFailed",
+    "RunCancelled",
     "RunFinished",
     "RunStarted",
     "RunStateSnapshot",

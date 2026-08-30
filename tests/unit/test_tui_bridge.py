@@ -23,6 +23,7 @@ from coding_agent.events import (
 )
 from coding_agent.model.client import ModelClient
 from coding_agent.model.types import ModelResponse, TokenUsage, ToolCall
+from coding_agent.session import AgentSession
 from coding_agent.tui.bridge import (
     AgentWorker,
     AgentWorkerError,
@@ -163,6 +164,7 @@ def test_agent_worker_runs_loop_on_daemon_thread_and_posts_terminal_messages(
         task="inspect",
         workspace=tmp_path,
         config=config,
+        session=AgentSession(tmp_path),
         thread_factory=thread_factory,
     )
     thread = worker.start()
@@ -194,7 +196,13 @@ def test_agent_worker_propagates_uncaught_exception(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(ModelClient, "from_config", classmethod(lambda cls, config: FailingModel()))
     config = AgentConfig(workspace_root=tmp_path, trace_root=tmp_path / "trace")
     app = _MessageCollectingApp()
-    worker = AgentWorker(app, task="boom", workspace=tmp_path, config=config)
+    worker = AgentWorker(
+        app,
+        task="boom",
+        workspace=tmp_path,
+        config=config,
+        session=AgentSession(tmp_path),
+    )
     thread = worker.start()
     thread.join(timeout=10)
 
@@ -203,10 +211,24 @@ def test_agent_worker_propagates_uncaught_exception(monkeypatch, tmp_path: Path)
     assert isinstance(errors[0].error, RuntimeError)
 
 
-def test_agent_worker_refuses_double_start(tmp_path: Path):
+def test_agent_worker_cancel_is_idempotent(tmp_path: Path):
     config = AgentConfig(workspace_root=tmp_path, trace_root=tmp_path / "trace")
     app = _MessageCollectingApp()
     worker = AgentWorker(app, task="t", workspace=tmp_path, config=config)
+    assert worker.cancel() is True
+    assert worker.cancel() is False
+
+
+def test_agent_worker_refuses_double_start(tmp_path: Path):
+    config = AgentConfig(workspace_root=tmp_path, trace_root=tmp_path / "trace")
+    app = _MessageCollectingApp()
+    worker = AgentWorker(
+        app,
+        task="t",
+        workspace=tmp_path,
+        config=config,
+        session=AgentSession(tmp_path),
+    )
     worker.start()
     with pytest.raises(RuntimeError, match="already started"):
         worker.start()
@@ -252,6 +274,7 @@ def test_events_arrive_on_worker_thread_and_sink_queues_messages_for_app_thread(
         task="t",
         workspace=tmp_path,
         config=config,
+        session=AgentSession(tmp_path),
         run_fn=run_fn,
     )
 
@@ -307,6 +330,7 @@ async def test_messages_are_consumed_after_worker_finishes(tmp_path: Path):
         task="t",
         workspace=tmp_path,
         config=config,
+        session=AgentSession(tmp_path),
         run_fn=quick_run,
     )
     thread = worker.start()

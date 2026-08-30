@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import threading
 from collections.abc import Callable
@@ -11,11 +12,13 @@ from typing import Any
 from textual.message import Message
 
 from coding_agent.agent.brief import TaskMode
+from coding_agent.agent.cancellation import CancellationToken
 from coding_agent.agent.loop import AgentRunResult
 from coding_agent.agent.loop import run as agent_run
 from coding_agent.config import AgentConfig
 from coding_agent.emitter import EventEmitter
 from coding_agent.events import AgentEvent
+from coding_agent.session import AgentSession
 
 _log = logging.getLogger(__name__)
 
@@ -83,6 +86,7 @@ class AgentWorker:
         task: str,
         workspace: Path,
         config: AgentConfig,
+        session: AgentSession | None = None,
         task_mode: TaskMode | str | None = None,
         run_fn: Callable[..., AgentRunResult] = agent_run,
         thread_factory: Callable[..., threading.Thread] = threading.Thread,
@@ -91,6 +95,8 @@ class AgentWorker:
         self.task = task
         self.workspace = workspace
         self.config = config
+        self.session = session or AgentSession(workspace)
+        self.cancellation_token = CancellationToken()
         self.task_mode = task_mode
         self.run_fn = run_fn
         self.thread_factory = thread_factory
@@ -118,17 +124,37 @@ class AgentWorker:
 
     def _run(self) -> None:
         try:
-            result = self.run_fn(
-                task=self.task,
-                workspace=self.workspace,
-                config=self.config,
-                emitter=self.emitter,
-                task_mode=self.task_mode,
+            run_kwargs: dict[str, Any] = {
+                "task": self.task,
+                "workspace": self.workspace,
+                "config": self.config,
+                "emitter": self.emitter,
+                "task_mode": self.task_mode,
+                "session": self.session,
+                "cancellation_token": self.cancellation_token,
+            }
+            parameters: tuple[inspect.Parameter, ...]
+            try:
+                parameters = tuple(inspect.signature(self.run_fn).parameters.values())
+            except (TypeError, ValueError):
+                parameters = ()
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
             )
+            if not accepts_kwargs and "cancellation_token" not in {
+                parameter.name for parameter in parameters
+            }:
+                run_kwargs.pop("cancellation_token")
+            result = self.run_fn(**run_kwargs)
         except Exception as exc:
             self._post(AgentWorkerError(exc))
         else:
             self._post(AgentWorkerResult(result))
+
+    def cancel(self) -> bool:
+        """Request cooperative cancellation without joining or touching UI."""
+        return self.cancellation_token.cancel()
 
     def _post(self, message: Message) -> None:
         """Post a completion message without allowing UI failures to escape."""

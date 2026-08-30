@@ -221,7 +221,10 @@ def run(
             config=config,
             task_mode=task_mode,
         )
-        console.print(f"\n[green]✓ done:[/green] {result.summary}")
+        if result.reply:
+            console.print(f"\n[cyan]assistant:[/cyan] {result.reply}")
+        else:
+            console.print(f"\n[green]✓ done:[/green] {result.summary}")
         console.print(f"[dim]Stop reason: {result.stop_reason}[/dim]")
         console.print(f"[dim]Steps: {result.steps}, Tokens: {result.total_tokens}[/dim]")
     except MissingCredentialsError as exc:

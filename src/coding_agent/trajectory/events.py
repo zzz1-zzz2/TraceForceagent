@@ -69,21 +69,35 @@ def event_to_record(event: AgentEvent) -> dict[str, Any]:
         payload["is_runtime_error"] = result.get("is_runtime_error", False)
         if event_type == "tool_failed":
             payload["error_msg"] = payload.get("error", "")
+    elif event_type == "assistant_replied":
+        final = payload.pop("final_state", {}) or {}
+        payload["type"] = "assistant_reply"
+        payload["reply"] = payload.pop("text", "")
+        payload["step"] = payload.get("step", final.get("steps", 0))
+        payload.update(_legacy_terminal_fields(final))
     elif event_type == "finish_accepted":
         final = payload.pop("final_state", {}) or {}
         payload["type"] = "finish"
         payload["step"] = payload.get("step", final.get("steps", 0))
         payload.update(_legacy_terminal_fields(final))
     elif event_type == "run_finished":
+        payload.setdefault("session_id", "")
         final = payload.pop("final_state", {}) or {}
         payload["type"] = "stop" if final.get("status") == "STOPPED" else "run_finished"
         payload["step"] = final.get("steps", 0)
         payload.update(_legacy_terminal_fields(final))
     elif event_type == "run_failed":
+        payload.setdefault("session_id", "")
         final = payload.pop("final_state", {}) or {}
         payload["type"] = "error"
         payload["step"] = final.get("steps", 0)
         payload["error_msg"] = payload.get("error", "")
+        payload.update(_legacy_terminal_fields(final))
+    elif event_type == "run_cancelled":
+        payload.setdefault("session_id", "")
+        final = payload.pop("final_state", {}) or {}
+        payload["type"] = "cancelled"
+        payload["step"] = final.get("steps", 0)
         payload.update(_legacy_terminal_fields(final))
     elif event_type == "feedback_recorded":
         payload["type"] = "feedback"

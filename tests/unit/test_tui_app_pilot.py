@@ -7,11 +7,15 @@ from pathlib import Path
 import pytest
 from textual.widgets import Input
 
+from coding_agent.agent.cancellation import CancellationToken
+from coding_agent.agent.loop import AgentRunResult
 from coding_agent.events import (
     AgentEvent,
+    AssistantReplied,
     FinishAccepted,
     ModelCompleted,
     ModelResponseSnapshot,
+    RunCancelled,
     RunFailed,
     RunFinished,
     RunStarted,
@@ -21,7 +25,7 @@ from coding_agent.events import (
     ToolStarted,
 )
 from coding_agent.tui.app import CodingAgentApp
-from coding_agent.tui.bridge import UiAgentEvent
+from coding_agent.tui.bridge import AgentWorkerResult, UiAgentEvent
 from coding_agent.tui.state import ToolUiStatus
 from coding_agent.tui.widgets import (
     AssistantMessageWidget,
@@ -103,7 +107,46 @@ async def test_lifecycle_events_create_and_reuse_component_cards(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_terminal_events_reuse_final_card_and_reenable_input(tmp_path: Path) -> None:
+async def test_assistant_reply_renders_and_reenables_input(tmp_path: Path) -> None:
+    app = CodingAgentApp(workspace=tmp_path)
+    async with app.run_test() as pilot:
+        await _post(app, pilot, RunStarted(run_id="run-1", sequence=1))
+        app.query_one(Input).disabled = True
+        await _post(app, pilot, AssistantReplied(
+            run_id="run-1",
+            sequence=2,
+            turn=1,
+            text="你好，世界",
+            final_state=RunStateSnapshot(
+                status="COMPLETED", reason="assistant_reply", summary="你好，世界"
+            ),
+        ))
+        await _post(app, pilot, RunFinished(
+            run_id="run-1",
+            sequence=3,
+            final_state=RunStateSnapshot(
+                status="COMPLETED", reason="assistant_reply", summary="你好，世界"
+            ),
+        ))
+        assert len(app.query(AssistantMessageWidget)) == 1
+        # Card C: RunFinished alone must NOT enable the Input. The worker
+        # thread still has ``session.complete_run`` to finish. Only the
+        # ``AgentWorkerResult`` message that the worker posts after
+        # ``agent_run`` returns may re-enable the composer.
+        assert app.query_one(Input).disabled
+        app.post_message(AgentWorkerResult(AgentRunResult(
+            summary="你好，世界",
+            validation="",
+            stop_reason="assistant_reply",
+            steps=0,
+            total_tokens=0,
+            duration=0.0,
+            reply="你好，世界",
+        )))
+        await pilot.pause()
+        assert not app.query_one(Input).disabled
+
+
     app = CodingAgentApp(workspace=tmp_path)
     async with app.run_test() as pilot:
         await _post(app, pilot, RunStarted(run_id="run-1", sequence=1))
@@ -132,7 +175,59 @@ async def test_terminal_events_reuse_final_card_and_reenable_input(tmp_path: Pat
         )
         assert len(app.query(FinalResultWidget)) == 1
         assert app.query_one(FinalResultWidget) is final
+        # Card C: same contract — RunFinished keeps the Input disabled until
+        # the worker thread returns.
+        assert app.query_one(Input).disabled
+        app.post_message(AgentWorkerResult(AgentRunResult(
+            summary="done",
+            validation="",
+            stop_reason="finish",
+            steps=1,
+            total_tokens=0,
+            duration=0.0,
+        )))
+        await pilot.pause()
         assert not app.query_one(Input).disabled
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_cancels_active_worker_then_exits_when_cancelling(tmp_path: Path) -> None:
+    app = CodingAgentApp(workspace=tmp_path)
+    token = CancellationToken()
+
+    class WorkerStub:
+        cancellation_token = token
+        is_alive = True
+
+        def cancel(self) -> bool:
+            return token.cancel()
+
+    async with app.run_test() as pilot:
+        app._worker = WorkerStub()  # type: ignore[assignment]
+        app.query_one(Input).disabled = True
+        await pilot.press("ctrl+c")
+        assert token.is_cancelled
+        assert "cancelling" in str(app.query_one("#run_status").render())
+        assert app.query_one(Input).disabled
+        await pilot.press("ctrl+c")
+        assert app.return_value is None
+
+
+    app = CodingAgentApp(workspace=tmp_path)
+    async with app.run_test() as pilot:
+        await _post(app, pilot, RunStarted(run_id="run-1", sequence=1))
+        await _post(app, pilot, RunCancelled(
+            run_id="run-1",
+            sequence=2,
+            final_state=RunStateSnapshot(
+                status="CANCELLED", reason="cancelled", summary="stopped", steps=1
+            ),
+        ))
+        final = app.query_one(FinalResultWidget)
+        assert "cancelled" in final.classes
+        assert "error" not in final.classes
+        assert "cancelled" in str(app.query_one("#run_status").render())
         await pilot.pause()
 
 

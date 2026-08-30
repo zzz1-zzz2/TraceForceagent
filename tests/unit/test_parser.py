@@ -5,6 +5,7 @@ import pytest
 from coding_agent.model.parsers.openai_compatible import OpenAICompatibleParser
 from coding_agent.model.types import (
     FinishAction,
+    AssistantReplyAction,
     InvalidAction,
     ModelResponse,
     TokenUsage,
@@ -121,6 +122,25 @@ class TestEmptyResponse:
 
 
 class TestTextOnlyResponse:
+    def test_stop_text_is_assistant_reply(self):
+        action = make_parser().parse(ModelResponse(
+            content="你好，我是 TraceForce。",
+            finish_reason="stop",
+            usage=TokenUsage(),
+        ))
+        assert isinstance(action, AssistantReplyAction)
+        assert action.reply_text == "你好，我是 TraceForce。"
+
+    @pytest.mark.parametrize("finish_reason", ["length", "content_filter", ""])
+    def test_incomplete_text_is_not_accepted(self, finish_reason):
+        action = make_parser().parse(ModelResponse(
+            content="回答未完成",
+            finish_reason=finish_reason,
+            usage=TokenUsage(),
+        ))
+        assert isinstance(action, InvalidAction)
+
+
     def test_text_response_without_tool_call(self):
         """模型只输出普通文本（不带 tool_call）→ InvalidAction。
         旧版本会把 'I'm done' / 'finished' 等文本识别为 finish 信号，

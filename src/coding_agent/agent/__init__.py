@@ -1,6 +1,7 @@
 """Agent 子模块：loop、state、termination、brief。"""
 
 from coding_agent.agent.brief import TaskBrief, TaskMode
+from coding_agent.agent.cancellation import CancellationRequested, CancellationToken
 from coding_agent.agent.loop import AgentRunResult, run
 from coding_agent.agent.state import AgentState, StopReason
 from coding_agent.agent.termination import TerminationController
@@ -12,6 +13,8 @@ __all__ = [
     "StopReason",
     "TaskBrief",
     "TaskMode",
+    "CancellationRequested",
+    "CancellationToken",
     "run",
     "AgentRunResult",
     "TerminationController",

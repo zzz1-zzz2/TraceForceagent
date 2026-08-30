@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from coding_agent.model.types import (
     AgentAction,
+    AssistantReplyAction,
     FinishAction,
     InvalidAction,
     ModelResponse,
@@ -66,7 +67,8 @@ class OpenAICompatibleParser:
         3. 单个 tool_call：先检查 JSON 解析失败 → InvalidAction(协议失败)；
            然后 tool 查找 / schema validation / finish 特殊路径；
         4. 文本 + 1 个 Tool Call：ToolAction.preamble = response.content；
-        5. 都没有：InvalidAction（普通文本不带 tool_call）。
+        5. 无 tool、content 非空且 finish_reason=stop：AssistantReplyAction；
+        6. 其它纯文本 / 未知终止原因：InvalidAction。
 
         注意：删除 text-based finish detection（"i'm done" / "i am done" /
         "task completed" / "finished"）。文本匹配会产生大量假阳性（如模型在
@@ -142,9 +144,13 @@ class OpenAICompatibleParser:
                 preamble=response.content,
             )
 
-        # 5. 模型在 content 里写了纯文本（不是 tool call）：
-        # 在 V1 policy 下视为 InvalidAction。让 AgentLoop 通过 record_feedback
-        # 告知模型"必须用 tool call"。
+        # 5. 合法普通回答：只有明确 stop 才接受为完整回答。
+        if response.content.strip() and finish_reason == "stop":
+            return AssistantReplyAction(response.content, raw_response=response.raw)
+
+        # 6. 纯文本但缺少合法 stop 终止原因：不接受为完整回答。
         return InvalidAction(
-            f"Model returned text instead of tool call: {_bounded(response.content)}"
+            f"Model returned text with unsupported finish_reason={finish_reason!r}: "
+            f"{_bounded(response.content)}",
+            is_protocol_failure=True,
         )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -13,10 +12,12 @@ from textual.widgets import Input
 from coding_agent import __version__
 from coding_agent.config import load_config, run_preflight
 from coding_agent.events import (
+    AssistantReplied,
     FeedbackRecorded,
     FinishAccepted,
     ModelCompleted,
     ModelFailed,
+    RunCancelled,
     RunFailed,
     RunFinished,
     RunStarted,
@@ -27,6 +28,7 @@ from coding_agent.events import (
     TurnStarted,
     ValidationCompleted,
 )
+from coding_agent.session import AgentSession
 from coding_agent.tui.bridge import AgentWorker, AgentWorkerError, AgentWorkerResult, UiAgentEvent
 from coding_agent.tui.routing import CommandKind, route_input
 from coding_agent.tui.state import RunUiState, initial_ui_state, reduce_event
@@ -51,7 +53,7 @@ class CodingAgentApp(App):
 
     CSS_PATH = "tui.css"
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
+        ("ctrl+c", "quit_or_cancel", "Cancel / quit"),
         ("ctrl+l", "clear_log", "Clear"),
         ("ctrl+o", "toggle_tools", "Expand/collapse tools"),
     ]
@@ -62,7 +64,7 @@ class CodingAgentApp(App):
     def __init__(self, workspace: Path | None = None) -> None:
         super().__init__()
         self._workspace: Path = (workspace or Path.cwd()).resolve()
-        self._chat_history: list[dict[str, str]] = []
+        self._session: AgentSession = AgentSession(workspace=self._workspace)
         self._ui_state: RunUiState = initial_ui_state()
         self._worker: AgentWorker | None = None
         self._welcome: WelcomeWidget | None = None
@@ -71,11 +73,6 @@ class CodingAgentApp(App):
         self._validation_widgets: dict[tuple[str, int], ValidationWidget] = {}
         self._notice_widgets: dict[tuple[str, int], NoticeWidget] = {}
         self._final_widgets: dict[str, FinalResultWidget] = {}
-        self._chat_system = (
-            "你是 TraceForce Agent，一个软件工程任务的 coding agent。"
-            "当前用户选择走纯对话模式（不带工具）。请用简洁中文回复，"
-            "但若用户提到具体工程任务，仍应说明自己无法执行需要工具的操作。"
-        )
 
     def compose(self) -> ComposeResult:
         yield BrandBarWidget(self._workspace, id="brand_bar")
@@ -149,14 +146,40 @@ class CodingAgentApp(App):
         self._welcome = WelcomeWidget(self._workspace, id="welcome")
         await self._append(self._welcome)
 
+    def _is_run_active(self) -> bool:
+        """Whether any worker thread or session run is currently in-flight."""
+        if self._worker is not None and self._worker.is_alive:
+            return True
+        return self._session.is_active
+
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Route a submitted line to a command, chat request, or Agent run."""
+        """Route a submitted line to a command, chat request, or Agent run.
+
+        Active-run guard runs before :func:`route_input` so that ``/clear``,
+        ``/workspace``, ``/chat`` and ordinary Agent tasks are all rejected
+        while a worker is still in-flight. ``Ctrl+L`` and ``Esc`` bypass the
+        guard because they do not start a run.
+        """
         raw = event.value.strip()
         event.input.value = ""
         route = route_input(raw)
 
+        if self._is_run_active() and route.kind in {
+            CommandKind.CLEAR,
+            CommandKind.WORKSPACE,
+            CommandKind.CHAT,
+            CommandKind.AGENT,
+        }:
+            await self._append(
+                NoticeWidget(
+                    "当前任务仍在运行；追加指令将在 Session 阶段开放",
+                    level="system",
+                )
+            )
+            return
+
         if route.kind is CommandKind.CLEAR:
-            self._chat_history.clear()
+            self._session.clear()
             await self._reset_transcript()
             self._ui_state = initial_ui_state()
             self._status().apply_state(self._ui_state)
@@ -174,8 +197,12 @@ class CodingAgentApp(App):
                 await self._append(NoticeWidget(f"无法创建目录 {new_path}: {exc}", level="error"))
                 return
             self._workspace = new_path
-            self.query_one(BrandBarWidget).set_workspace(new_path)
+            self._session = AgentSession(workspace=self._workspace)
+            await self._reset_transcript()
+            self._ui_state = initial_ui_state()
+            self._status().apply_state(self._ui_state)
             self._footer().set_workspace(new_path)
+            self.query_one(BrandBarWidget).set_workspace(new_path)
             if self._welcome is not None:
                 self._welcome.set_workspace(new_path)
             await self._append(NoticeWidget(f"workspace 已切换到 {new_path}", level="system"))
@@ -190,19 +217,13 @@ class CodingAgentApp(App):
                 await self._append(NoticeWidget("用法：/chat <你的消息>", level="error"))
             return
 
-        if route.kind is CommandKind.CHAT:
-            await self._hide_welcome()
-            await self._append(UserMessageWidget(route.payload, chat=True))
-            await self.run_chat(route.payload)
-            return
-
         await self._hide_welcome()
         await self._append(UserMessageWidget(route.payload))
         await self.run_agent(route.payload)
 
     async def run_agent(self, task: str) -> None:
         """Start the AgentLoop worker; lifecycle messages drive the UI."""
-        if self._worker is not None and self._worker.is_alive:
+        if self._is_run_active():
             await self._append(NoticeWidget("当前任务仍在运行；追加指令将在 Session 阶段开放", level="system"))
             return
 
@@ -224,6 +245,7 @@ class CodingAgentApp(App):
                 )
             )
             self._status().update("✗ preflight failed")
+            # Preflight failure must NOT touch the Session or fake a Run.
             return
 
         self._ui_state = initial_ui_state()
@@ -233,6 +255,7 @@ class CodingAgentApp(App):
             task=task,
             workspace=config.workspace_root,
             config=config,
+            session=self._session,
         )
         self._worker.start()
         self._status().apply_state(self._ui_state)
@@ -263,7 +286,28 @@ class CodingAgentApp(App):
                     await self._append(assistant_widget)
                 else:
                     assistant_widget.set_content(response.content)
-        elif isinstance(event, (ToolStarted, ToolCompleted, ToolFailed)):
+        elif isinstance(event, AssistantReplied):
+            assistant_key = (event.run_id, event.turn)
+            assistant_widget = self._assistant_widgets.get(assistant_key)
+            if assistant_widget is None:
+                assistant_widget = AssistantMessageWidget(event.text)
+                self._assistant_widgets[assistant_key] = assistant_widget
+                await self._append(assistant_widget)
+            else:
+                assistant_widget.set_content(event.text)
+        elif isinstance(event, ToolStarted):
+            tool_key = (event.run_id, event.action_id)
+            tool_state = self._ui_state.tools.get(tool_key)
+            if tool_state is None:
+                return
+            tool_widget = self._tool_widgets.get(tool_key)
+            if tool_widget is None:
+                tool_widget = ToolExecutionWidget(tool_state)
+                self._tool_widgets[tool_key] = tool_widget
+                await self._append(tool_widget)
+            else:
+                tool_widget.apply_state(tool_state)
+        elif isinstance(event, (ToolCompleted, ToolFailed)):
             tool_key = (event.run_id, event.action_id)
             tool_state = self._ui_state.tools.get(tool_key)
             if tool_state is None:
@@ -298,14 +342,19 @@ class CodingAgentApp(App):
             await self._update_final(event.run_id)
         elif isinstance(event, RunFinished):
             await self._update_final(event.run_id)
-            self._finish_agent_input()
         elif isinstance(event, RunFailed):
             for tool_key, tool_state in self._ui_state.tools.items():
                 tool_widget = self._tool_widgets.get(tool_key)
                 if tool_widget is not None:
                     tool_widget.apply_state(tool_state)
             await self._update_final(event.run_id)
-            self._finish_agent_input()
+        elif isinstance(event, RunCancelled):
+            for tool_key, tool_state in self._ui_state.tools.items():
+                tool_widget = self._tool_widgets.get(tool_key)
+                if tool_widget is not None:
+                    tool_widget.apply_state(tool_state)
+            await self._update_final(event.run_id)
+
         elif isinstance(event, (TurnStarted, TurnEnded)):
             return
 
@@ -318,53 +367,53 @@ class CodingAgentApp(App):
         widget.apply_state(self._ui_state)
 
     def on_agent_worker_result(self, message: AgentWorkerResult) -> None:
-        """Use the result only as a fallback when no terminal event arrived."""
+        """Final teardown after a worker thread has fully returned.
+
+        This is the only place that re-enables the composer Input. Doing it
+        here (not in the ``RunFinished`` lifecycle event) guarantees that
+        ``session.complete_run()`` has already returned on the worker thread
+        before a new run can be submitted.
+        """
         if not self._ui_state.terminal:
             self._status().update(
                 f"✓ finished · {message.result.steps} steps · {message.result.total_tokens:,} tokens"
             )
-        self._finish_agent_input()
+        self._complete_worker()
 
     async def on_agent_worker_error(self, message: AgentWorkerError) -> None:
-        """Surface an uncaught worker error without duplicating RunFailed."""
+        """Surface an uncaught worker error without duplicating RunFailed.
+
+        Mirrors :meth:`on_agent_worker_result`: this is the only place that
+        re-enables the composer Input on error, so it always runs after the
+        worker thread has returned and ``session.fail_run()`` released the
+        active-run guard.
+        """
         if not self._ui_state.terminal:
             await self._append(NoticeWidget(str(message.error), level="error"))
             self._status().update("✗ error")
-        self._finish_agent_input()
+        self._complete_worker()
 
-    def _finish_agent_input(self) -> None:
+    def _complete_worker(self) -> None:
+        """Single teardown path for the worker.
+
+        Drops the worker reference so subsequent submissions see a clean
+        state, then re-enables the composer Input and refocuses it.
+        """
+        self._worker = None
         input_widget = self.query_one("#input", Input)
         input_widget.disabled = False
         input_widget.focus()
 
-    async def run_chat(self, user_msg: str) -> None:
-        """Run the explicit no-tools chat mode while preserving history."""
-        input_widget = self.query_one("#input", Input)
-        input_widget.disabled = True
-        self._status().update("✻ chat…")
-        try:
-            from coding_agent.model.client import ModelClient
-
-            client = ModelClient.from_config(load_config())
-            self._chat_history.append({"role": "user", "content": user_msg})
-            messages: list[dict[str, str]] = [
-                {"role": "system", "content": self._chat_system},
-                *self._chat_history,
-            ]
-            loop = asyncio.get_running_loop()
-            reply = await loop.run_in_executor(
-                None,
-                lambda: client.chat(messages=messages, max_tokens=500),
-            )
-            self._chat_history.append({"role": "assistant", "content": reply.strip()})
-            await self._append(AssistantMessageWidget(reply.strip()))
-            self._status().update(f"chat · {len(self._chat_history) // 2} turns")
-        except Exception as exc:
-            await self._append(NoticeWidget(str(exc), level="error"))
-            self._status().update("✗ error")
-        finally:
-            input_widget.disabled = False
-            input_widget.focus()
+    def action_quit_or_cancel(self) -> None:
+        """Cancel an active run once; quit if idle or already cancelling."""
+        if self._worker is None or not self._worker.is_alive:
+            self.exit()
+            return
+        if self._worker.cancellation_token.is_cancelled:
+            self.exit()
+            return
+        if self._worker.cancel():
+            self._status().update("• cancelling…")
 
     def action_clear_log(self) -> None:
         """Clear the component transcript, preserving the composer."""

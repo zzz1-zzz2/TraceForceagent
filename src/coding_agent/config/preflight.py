@@ -90,7 +90,7 @@ _DEFAULT_CHECKS: Final[tuple[str, ...]] = (
 )
 
 
-_REQUIRED_TOOLS: Final[tuple[str, ...]] = ("git", "rg")
+_REQUIRED_TOOLS: Final[tuple[str, ...]] = ("git",)
 
 
 def _check_provider(config: AgentConfig) -> PreflightCheck:
@@ -248,6 +248,16 @@ def run_preflight(
     for tool in _REQUIRED_TOOLS:
         if tool in selected:
             rows.append(_check_tool(tool))
+    if "rg" in selected:
+        rg_row = _check_tool("rg")
+        if rg_row.ok:
+            rows.append(rg_row)
+        else:
+            rows.append(PreflightCheck(
+                name="rg",
+                ok=True,
+                detail="optional; search_code will degrade gracefully",
+            ))
 
     user_config_row = _check_user_config(config)
     if user_config_row.ok:

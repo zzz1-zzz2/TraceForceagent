@@ -14,10 +14,11 @@ from enum import Enum
 from pathlib import Path
 
 
-class StopReason(str, Enum):
+class StopReason(str, Enum):  # noqa: UP042 - preserve the public enum type
     """循环终止原因。"""
 
     FINISH = "finish"  # 模型显式 finish
+    ASSISTANT_REPLY = "assistant_reply"  # 普通助手回答
     MAX_STEPS = "max_steps"
     MAX_MODEL_CALLS = "max_model_calls"
     MAX_WALL_TIME = "max_wall_time"
@@ -25,6 +26,7 @@ class StopReason(str, Enum):
     MAX_CONSECUTIVE_TIMEOUTS = "max_consecutive_timeouts"
     REPEATED_ACTION = "repeated_action"
     STAGNATION = "stagnation"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -71,6 +73,8 @@ class AgentState:
     finish_summary: str | None = None
     finish_validation: str | None = None
     finish_validation_skipped_reason: str | None = None
+    finish_notes: str | None = None
+    reply_text: str | None = None
 
     # --- Mutation / Validation tracking (P0-2 / P0-3) ---
     # 用于 FinishPolicy 校验：必须"修改 → validation 通过"才能 finish。
@@ -262,20 +266,33 @@ class AgentState:
             tuple(self.current_findings[-3:]) if self.current_findings else (),
         )
 
+    def mark_answered(self, text: str) -> None:
+        """Mark the run complete with a direct assistant answer."""
+        self.status = "COMPLETED"
+        self.reply_text = text
+        self.stop_reason = StopReason.ASSISTANT_REPLY
+
     def mark_finished(
         self,
         summary: str,
         validation: str = "",
         validation_skipped_reason: str = "",
+        notes: str = "",
     ) -> None:
         """标记为完成（finish tool 调用时）。"""
         self.status = "COMPLETED"
         self.finish_summary = summary
         self.finish_validation = validation
         self.finish_validation_skipped_reason = validation_skipped_reason or None
+        self.finish_notes = notes or None
         self.stop_reason = StopReason.FINISH
 
     def mark_stopped(self, reason: StopReason) -> None:
         """标记为保护性终止。"""
         self.status = "STOPPED"
         self.stop_reason = reason
+
+    def mark_cancelled(self) -> None:
+        """Mark the run as cooperatively cancelled."""
+        self.status = "CANCELLED"
+        self.stop_reason = StopReason.CANCELLED

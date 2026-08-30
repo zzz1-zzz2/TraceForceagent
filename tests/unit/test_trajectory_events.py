@@ -8,7 +8,9 @@ import pytest
 
 from coding_agent.emitter import CriticalEventDeliveryError, EventCollector, EventEmitter
 from coding_agent.events import (
+    AssistantReplied,
     FinishAccepted,
+    RunCancelled,
     RunFinished,
     RunStarted,
     RunStateSnapshot,
@@ -68,7 +70,23 @@ def test_event_to_record_rejects_unknown_values():
         event_to_record(event)
 
 
-def test_run_finished_serializes_terminal_snapshot():
+def test_assistant_reply_serializes_as_distinct_terminal_record():
+    record = event_to_record(AssistantReplied(
+        run_id="r",
+        sequence=3,
+        turn=1,
+        text="你好",
+        final_state=RunStateSnapshot(
+            status="COMPLETED", reason="assistant_reply", summary="你好"
+        ),
+    ))
+    assert record["event_type"] == "assistant_replied"
+    assert record["type"] == "assistant_reply"
+    assert record["reply"] == "你好"
+    assert record["reason"] == "assistant_reply"
+
+
+def test_run_finished_serializes_terminal_record():
     record = event_to_record(RunFinished(
         run_id="r",
         sequence=3,
@@ -87,6 +105,28 @@ def test_run_finished_serializes_terminal_snapshot():
     assert record["step"] == 2
     assert record["total_steps"] == 2
     assert record["modified_files"] == ["b.py", "a.py"]
+    json.dumps(record)
+
+
+def test_run_cancelled_serializes_terminal_record():
+    record = event_to_record(RunCancelled(
+        run_id="r",
+        sequence=3,
+        session_id="s",
+        final_state=RunStateSnapshot(
+            status="CANCELLED",
+            reason="cancelled",
+            summary="stopped safely",
+            steps=2,
+            total_tokens=9,
+        ),
+    ))
+    assert record["event_type"] == "run_cancelled"
+    assert record["type"] == "cancelled"
+    assert record["status"] == "CANCELLED"
+    assert record["reason"] == "cancelled"
+    assert record["summary"] == "stopped safely"
+    assert record["step"] == 2
     json.dumps(record)
 
 
