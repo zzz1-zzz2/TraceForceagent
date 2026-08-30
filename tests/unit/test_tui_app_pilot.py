@@ -193,7 +193,18 @@ async def test_assistant_reply_renders_and_reenables_input(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_ctrl_c_cancels_active_worker_then_exits_when_cancelling(tmp_path: Path) -> None:
-    app = CodingAgentApp(workspace=tmp_path)
+    class LifecycleApp(CodingAgentApp):
+        CSS_PATH = str(Path(__file__).resolve().parents[2] / "src/coding_agent/tui/tui.css")
+
+        def __init__(self, workspace: Path) -> None:
+            super().__init__(workspace=workspace)
+            self.exit_calls = 0
+
+        def exit(self, result=None, return_code: int = 0, message=None) -> None:
+            self.exit_calls += 1
+            super().exit(result=result, return_code=return_code, message=message)
+
+    app = LifecycleApp(tmp_path)
     token = CancellationToken()
 
     class WorkerStub:
@@ -208,10 +219,22 @@ async def test_ctrl_c_cancels_active_worker_then_exits_when_cancelling(tmp_path:
         app.query_one(Input).disabled = True
         await pilot.press("ctrl+c")
         assert token.is_cancelled
+        assert app.exit_calls == 0
+        assert app.is_running
         assert "cancelling" in str(app.query_one("#run_status").render())
         assert app.query_one(Input).disabled
+
+        # Give the message pump a full idle turn before the second keypress;
+        # this proves cancellation does not itself terminate the app.
+        await pilot.pause()
+        assert app.is_running
+        assert app.exit_calls == 0
+
+        # A deliberate second press after the repeat guard exits the app.
+        await pilot.pause(delay=app.CANCEL_EXIT_GUARD_SECONDS + 0.05)
         await pilot.press("ctrl+c")
-        assert app.return_value is None
+        assert app.exit_calls == 1
+        assert not app.is_running
 
 
     app = CodingAgentApp(workspace=tmp_path)
@@ -229,6 +252,44 @@ async def test_ctrl_c_cancels_active_worker_then_exits_when_cancelling(tmp_path:
         assert "error" not in final.classes
         assert "cancelled" in str(app.query_one("#run_status").render())
         await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_repeat_within_guard_window_does_not_exit(tmp_path: Path) -> None:
+    class LifecycleApp(CodingAgentApp):
+        CSS_PATH = str(Path(__file__).resolve().parents[2] / "src/coding_agent/tui/tui.css")
+
+        def __init__(self, workspace: Path) -> None:
+            super().__init__(workspace=workspace)
+            self.exit_calls = 0
+
+        def exit(self, result=None, return_code: int = 0, message=None) -> None:
+            self.exit_calls += 1
+            super().exit(result=result, return_code=return_code, message=message)
+
+    app = LifecycleApp(tmp_path)
+    token = CancellationToken()
+
+    class WorkerStub:
+        cancellation_token = token
+        is_alive = True
+
+        def cancel(self) -> bool:
+            return token.cancel()
+
+    async with app.run_test() as pilot:
+        app._worker = WorkerStub()  # type: ignore[assignment]
+        app.query_one(Input).disabled = True
+        await pilot.press("ctrl+c")
+        await pilot.press("ctrl+c")
+        assert token.is_cancelled
+        assert app.exit_calls == 0
+        assert app.is_running
+
+        await pilot.pause(delay=app.CANCEL_EXIT_GUARD_SECONDS + 0.05)
+        await pilot.press("ctrl+c")
+        assert app.exit_calls == 1
+        assert not app.is_running
 
 
 @pytest.mark.asyncio

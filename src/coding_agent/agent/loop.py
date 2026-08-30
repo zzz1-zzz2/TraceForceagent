@@ -693,7 +693,6 @@ def _run_loop(
                 ))
 
             active_tool = None
-            token.raise_if_cancelled()
             if action.tool_name == "run_command":
                 command = str(action.arguments.get("command", ""))
                 verdict = classify_validation(observation, command)
@@ -715,6 +714,7 @@ def _run_loop(
                 observation_changed=observation.success,
             )
             state.mark_step_done()
+            token.raise_if_cancelled()
             end_turn(turn_number, "completed")
 
     except Exception as exc:
