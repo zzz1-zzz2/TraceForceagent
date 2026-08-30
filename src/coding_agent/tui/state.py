@@ -44,6 +44,7 @@ class ToolUiStatus(StrEnum):
 
 
 ToolKey = tuple[str, str]
+AssistantKey = tuple[str, int]
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,10 @@ class RunUiState:
     validation: ValidationUiState | None = None
     feedback: tuple[str, ...] = ()
     assistant_messages: tuple[str, ...] = ()
+    assistant_message_keys: tuple[AssistantKey, ...] = ()
+    assistant_drafts: Mapping[AssistantKey, str] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
     assistant_draft: str = ""
     assistant_draft_turn: int | None = None
     finish_accepted: bool = False
@@ -121,6 +126,7 @@ class RunUiState:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", MappingProxyType(dict(self.tools)))
+        object.__setattr__(self, "assistant_drafts", MappingProxyType(dict(self.assistant_drafts)))
 
 
 def initial_ui_state(run_id: str = "") -> RunUiState:
@@ -176,6 +182,8 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             validation=None,
             feedback=(),
             assistant_messages=(),
+            assistant_message_keys=(),
+            assistant_drafts={},
             assistant_draft="",
             assistant_draft_turn=None,
             finish_accepted=False,
@@ -201,15 +209,16 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
         )
 
     if isinstance(event, ModelDelta):
-        draft = event.text
-        if state.assistant_draft_turn == event.turn:
-            draft = state.assistant_draft + event.text
-        assistant_messages = state.assistant_messages
-        if draft:
-            if state.assistant_draft_turn == event.turn and assistant_messages:
-                assistant_messages = (*assistant_messages[:-1], draft)
-            else:
-                assistant_messages = (*assistant_messages, draft)
+        assistant_key = (event.run_id, event.turn)
+        drafts = dict(state.assistant_drafts)
+        draft = drafts.get(assistant_key, "") + event.text
+        drafts[assistant_key] = draft
+        assistant_messages = _replace_assistant_message(
+            state.assistant_messages,
+            state.assistant_message_keys,
+            assistant_key,
+            draft,
+        )
         return replace(
             state,
             phase="thinking",
@@ -218,6 +227,12 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
             model=event.model or state.model,
             model_running=True,
             assistant_messages=assistant_messages,
+            assistant_message_keys=(
+                _upsert_assistant_key(state.assistant_message_keys, assistant_key)
+                if draft
+                else state.assistant_message_keys
+            ),
+            assistant_drafts=drafts,
             assistant_draft=draft,
             assistant_draft_turn=event.turn,
         )
@@ -225,13 +240,16 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
     if isinstance(event, ModelCompleted):
         response = event.response
         content = response.content if response is not None else ""
-        assistant_messages = state.assistant_messages
-        is_current_draft = state.assistant_draft_turn == event.turn
-        if content.strip():
-            if is_current_draft and assistant_messages:
-                assistant_messages = (*assistant_messages[:-1], content)
-            else:
-                assistant_messages = (*assistant_messages, content)
+        assistant_key = (event.run_id, event.turn)
+        drafts = dict(state.assistant_drafts)
+        previous_draft = drafts.pop(assistant_key, "")
+        has_content = bool(content) or bool(previous_draft)
+        assistant_messages = _replace_assistant_message(
+            state.assistant_messages,
+            state.assistant_message_keys,
+            assistant_key,
+            content,
+        ) if has_content else state.assistant_messages
         return replace(
             state,
             phase="thinking",
@@ -245,8 +263,14 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
                 (response.input_tokens + response.output_tokens) if response else 0
             ),
             assistant_messages=assistant_messages,
+            assistant_message_keys=(
+                _upsert_assistant_key(state.assistant_message_keys, assistant_key)
+                if has_content
+                else state.assistant_message_keys
+            ),
+            assistant_drafts=drafts,
             assistant_draft="",
-            assistant_draft_turn=event.turn if is_current_draft else state.assistant_draft_turn,
+            assistant_draft_turn=event.turn if previous_draft else state.assistant_draft_turn,
         )
 
     if isinstance(event, ModelFailed):
@@ -297,18 +321,25 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
 
     if isinstance(event, AssistantReplied):
         final = event.final_state
-        assistant_messages = state.assistant_messages
-        if event.text.strip():
-            if state.assistant_draft_turn == event.turn and assistant_messages:
-                assistant_messages = (*assistant_messages[:-1], event.text)
-            else:
-                assistant_messages = (*assistant_messages, event.text)
+        assistant_key = (event.run_id, event.turn)
+        assistant_messages = _replace_assistant_message(
+            state.assistant_messages,
+            state.assistant_message_keys,
+            assistant_key,
+            event.text,
+        ) if event.text.strip() else state.assistant_messages
+        drafts = dict(state.assistant_drafts)
+        drafts.pop(assistant_key, None)
         return replace(
             state,
             phase="answered",
             turn=event.turn,
             step=event.step,
             assistant_messages=assistant_messages,
+            assistant_message_keys=_upsert_assistant_key(
+                state.assistant_message_keys, assistant_key
+            ),
+            assistant_drafts=drafts,
             assistant_draft="",
             assistant_draft_turn=event.turn,
             terminal_status=final.status,
@@ -417,6 +448,31 @@ def _reduce_current_run(state: RunUiState, event: AgentEvent) -> RunUiState:
     return state
 
 
+def _upsert_assistant_key(
+    keys: tuple[AssistantKey, ...], key: AssistantKey
+) -> tuple[AssistantKey, ...]:
+    """Keep assistant message order stable while recording a new logical card."""
+    if key in keys:
+        return keys
+    return (*keys, key)
+
+
+def _replace_assistant_message(
+    messages: tuple[str, ...],
+    known_keys: tuple[AssistantKey, ...],
+    key: AssistantKey,
+    content: str,
+) -> tuple[str, ...]:
+    """Replace a keyed draft, or append a new assistant message in order."""
+    try:
+        index = known_keys.index(key)
+    except ValueError:
+        return (*messages, content) if content else messages
+    if index >= len(messages):
+        return (*messages, content) if content else messages
+    return (*messages[:index], content, *messages[index + 1:])
+
+
 def _reduce_tool_terminal(
     state: RunUiState,
     event: ToolCompleted | ToolFailed,
@@ -464,6 +520,7 @@ def _copy_arguments(arguments: Mapping[str, object]) -> Mapping[str, object]:
 
 __all__ = [
     "RunUiState",
+    "AssistantKey",
     "ToolKey",
     "ToolUiState",
     "ToolUiStatus",

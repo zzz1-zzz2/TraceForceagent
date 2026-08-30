@@ -81,6 +81,7 @@ class CodingAgentApp(App):
         self._session: AgentSession = AgentSession(workspace=self._workspace)
         self._ui_state: RunUiState = initial_ui_state()
         self._worker: AgentWorker | None = None
+        self._worker_generation = 0
         self._cancel_requested_at: float | None = None
         self._welcome: WelcomeWidget | None = None
         self._assistant_widgets: dict[tuple[str, int], AssistantMessageWidget] = {}
@@ -303,6 +304,7 @@ class CodingAgentApp(App):
 
         self._ui_state = initial_ui_state()
         self._cancel_requested_at = None
+        self._worker_generation += 1
         self.query_one("#input", Input).disabled = True
         self._worker = AgentWorker(
             self,
@@ -310,6 +312,7 @@ class CodingAgentApp(App):
             workspace=config.workspace_root,
             config=config,
             session=self._session,
+            worker_id=self._worker_generation,
         )
         self._worker.start()
         self._status().apply_state(self._ui_state)
@@ -333,8 +336,10 @@ class CodingAgentApp(App):
         elif isinstance(event, ModelDelta):
             assistant_key = (event.run_id, event.turn)
             assistant_widget = self._assistant_widgets.get(assistant_key)
-            draft = self._ui_state.assistant_draft
+            draft = self._ui_state.assistant_drafts.get(assistant_key, "")
             if assistant_widget is None:
+                if not draft:
+                    return
                 assistant_widget = AssistantMessageWidget(draft)
                 self._assistant_widgets[assistant_key] = assistant_widget
                 await self._append(assistant_widget)
@@ -345,16 +350,15 @@ class CodingAgentApp(App):
             assistant_key = (event.run_id, event.turn)
             self._flush_pending_assistant_renders(assistant_key)
             response = event.response
-            if response is not None and response.content.strip():
-                assistant_key = (event.run_id, event.turn)
+            if response is not None:
                 assistant_widget = self._assistant_widgets.get(assistant_key)
                 if assistant_widget is None:
-                    assistant_widget = AssistantMessageWidget(response.content)
-                    self._assistant_widgets[assistant_key] = assistant_widget
-                    await self._append(assistant_widget)
-                else:
-                    if assistant_widget.content != response.content:
-                        assistant_widget.set_content(response.content)
+                    if response.content.strip():
+                        assistant_widget = AssistantMessageWidget(response.content)
+                        self._assistant_widgets[assistant_key] = assistant_widget
+                        await self._append(assistant_widget)
+                elif assistant_widget.content != response.content:
+                    assistant_widget.set_content(response.content)
         elif isinstance(event, AssistantReplied):
             assistant_key = (event.run_id, event.turn)
             self._flush_pending_assistant_renders(assistant_key)
@@ -408,6 +412,7 @@ class CodingAgentApp(App):
                 self._notice_widgets[notice_key] = notice_widget
                 await self._append(notice_widget)
         elif isinstance(event, ModelFailed):
+            self._flush_pending_assistant_renders((event.run_id, event.turn))
             await self._append(NoticeWidget(event.error or event.error_type, level="error"))
         elif isinstance(event, FinishAccepted):
             self._flush_pending_assistant_renders()
@@ -448,11 +453,13 @@ class CodingAgentApp(App):
         ``session.complete_run()`` has already returned on the worker thread
         before a new run can be submitted.
         """
+        if message.worker_id is not None and message.worker_id != self._active_worker_id():
+            return
         if not self._ui_state.terminal:
             self._status().update(
                 f"✓ finished · {message.result.steps} steps · {message.result.total_tokens:,} tokens"
             )
-        self._complete_worker()
+        self._complete_worker(message.worker_id)
 
     async def on_agent_worker_error(self, message: AgentWorkerError) -> None:
         """Surface an uncaught worker error without duplicating RunFailed.
@@ -462,17 +469,24 @@ class CodingAgentApp(App):
         worker thread has returned and ``session.fail_run()`` released the
         active-run guard.
         """
+        if message.worker_id is not None and message.worker_id != self._active_worker_id():
+            return
         if not self._ui_state.terminal:
             await self._append(NoticeWidget(str(message.error), level="error"))
             self._status().update("✗ error")
-        self._complete_worker()
+        self._complete_worker(message.worker_id)
 
-    def _complete_worker(self) -> None:
+    def _active_worker_id(self) -> int | None:
+        return self._worker.worker_id if self._worker is not None else None
+
+    def _complete_worker(self, worker_id: int | None = None) -> None:
         """Single teardown path for the worker.
 
         Drops the worker reference so subsequent submissions see a clean
         state, then re-enables the composer Input and refocuses it.
         """
+        if worker_id is not None and worker_id != self._active_worker_id():
+            return
         self._flush_pending_assistant_renders()
         self._worker = None
         self._cancel_requested_at = None

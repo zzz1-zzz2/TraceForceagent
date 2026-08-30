@@ -382,7 +382,27 @@ def test_model_completed_replaces_streaming_draft_and_reply_does_not_duplicate()
     assert state.assistant_draft == ""
 
 
-def test_streaming_draft_is_isolated_between_turns():
+def test_model_completed_empty_response_retires_only_that_turn_draft():
+    state = reduce_event(initial_ui_state(), _started("run-1", sequence=1))
+    state = reduce_event(state, ModelDelta(run_id="run-1", sequence=2, turn=1, text="partial"))
+    state = reduce_event(state, ModelDelta(run_id="run-1", sequence=3, turn=2, text="other"))
+    state = reduce_event(state, _model_completed("run-1", sequence=4, turn=1))
+
+    assert state.assistant_messages == ("", "other")
+    assert state.assistant_message_keys == (("run-1", 1), ("run-1", 2))
+    assert state.assistant_drafts == {("run-1", 2): "other"}
+
+
+def test_interleaved_turn_completion_replaces_only_matching_message():
+    state = reduce_event(initial_ui_state(), _started("run-1", sequence=1))
+    state = reduce_event(state, ModelDelta(run_id="run-1", sequence=2, turn=1, text="first"))
+    state = reduce_event(state, ModelDelta(run_id="run-1", sequence=3, turn=2, text="second"))
+    state = reduce_event(state, _model_completed("run-1", sequence=4, turn=1, content="FIRST"))
+
+    assert state.assistant_messages == ("FIRST", "second")
+    assert state.assistant_drafts == {("run-1", 2): "second"}
+
+
     state = reduce_event(initial_ui_state(), _started("run-1", sequence=1))
     state = reduce_event(state, ModelDelta(run_id="run-1", sequence=2, turn=1, text="first"))
     state = reduce_event(state, ModelDelta(run_id="run-1", sequence=3, turn=2, text="second"))

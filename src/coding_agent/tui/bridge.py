@@ -26,25 +26,32 @@ _log = logging.getLogger(__name__)
 class UiAgentEvent(Message):
     """A lifecycle event queued for handling by the Textual app thread."""
 
-    def __init__(self, event: AgentEvent) -> None:
+    def __init__(self, event: AgentEvent, worker_id: int | None = None) -> None:
         super().__init__()
         self.event = event
+        self.worker_id = worker_id
 
 
 class AgentWorkerResult(Message):
     """Posted by :class:`AgentWorker` after a successful run."""
 
-    def __init__(self, result: AgentRunResult) -> None:
+    def __init__(
+        self,
+        result: AgentRunResult,
+        worker_id: int | None = None,
+    ) -> None:
         super().__init__()
         self.result = result
+        self.worker_id = worker_id
 
 
 class AgentWorkerError(Message):
     """Posted by :class:`AgentWorker` after an uncaught run exception."""
 
-    def __init__(self, error: Exception) -> None:
+    def __init__(self, error: Exception, worker_id: int | None = None) -> None:
         super().__init__()
         self.error = error
+        self.worker_id = worker_id
 
 
 class TuiEventSink:
@@ -58,12 +65,13 @@ class TuiEventSink:
 
     critical = False
 
-    def __init__(self, owner: Any) -> None:
+    def __init__(self, owner: Any, worker_id: int | None = None) -> None:
         self.owner = owner
+        self.worker_id = worker_id
 
     def __call__(self, event: AgentEvent) -> None:
         try:
-            queued = self.owner.post_message(UiAgentEvent(event))
+            queued = self.owner.post_message(UiAgentEvent(event, worker_id=self.worker_id))
         except Exception:
             _log.exception("TUI event sink failed for %s", event.event_type)
             return
@@ -90,6 +98,7 @@ class AgentWorker:
         task_mode: TaskMode | str | None = None,
         run_fn: Callable[..., AgentRunResult] = agent_run,
         thread_factory: Callable[..., threading.Thread] = threading.Thread,
+        worker_id: int | None = None,
     ) -> None:
         self.owner = owner
         self.task = task
@@ -101,8 +110,9 @@ class AgentWorker:
         self.run_fn = run_fn
         self.thread_factory = thread_factory
         self.emitter = EventEmitter()
-        self.sink = TuiEventSink(owner)
         self.thread: threading.Thread | None = None
+        self.worker_id = worker_id if worker_id is not None else id(self)
+        self.sink = TuiEventSink(owner, worker_id=self.worker_id)
 
     @property
     def is_alive(self) -> bool:
@@ -148,9 +158,9 @@ class AgentWorker:
                 run_kwargs.pop("cancellation_token")
             result = self.run_fn(**run_kwargs)
         except Exception as exc:
-            self._post(AgentWorkerError(exc))
+            self._post(AgentWorkerError(exc, worker_id=self.worker_id))
         else:
-            self._post(AgentWorkerResult(result))
+            self._post(AgentWorkerResult(result, worker_id=self.worker_id))
 
     def cancel(self) -> bool:
         """Request cooperative cancellation without joining or touching UI."""
