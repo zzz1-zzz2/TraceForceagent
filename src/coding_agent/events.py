@@ -187,6 +187,23 @@ class RunFailed(BaseEvent):
 
 
 @dataclass(frozen=True, kw_only=True)
+class RunCancelled(BaseEvent):
+    """Published after a run's cancelled Session snapshot is committed."""
+
+    event_type: ClassVar[str] = "run_cancelled"
+    session_id: str = ""
+    final_state: RunStateSnapshot = RunStateSnapshot()
+
+    @property
+    def status(self) -> str:
+        return self.final_state.status
+
+    @property
+    def reason(self) -> str:
+        return self.final_state.reason
+
+
+@dataclass(frozen=True, kw_only=True)
 class TurnStarted(BaseEvent):
     event_type: ClassVar[str] = "turn_started"
     turn: int = 0
@@ -336,6 +353,7 @@ AgentEvent: TypeAlias = (
     RunStarted
     | RunFinished
     | RunFailed
+    | RunCancelled
     | FeedbackRecorded
     | ValidationCompleted
     | AssistantReplied
@@ -361,6 +379,7 @@ __all__ = [
     "ModelResponseSnapshot",
     "ModelStarted",
     "RunFailed",
+    "RunCancelled",
     "RunFinished",
     "RunStarted",
     "RunStateSnapshot",

@@ -10,6 +10,7 @@ from coding_agent.emitter import CriticalEventDeliveryError, EventCollector, Eve
 from coding_agent.events import (
     AssistantReplied,
     FinishAccepted,
+    RunCancelled,
     RunFinished,
     RunStarted,
     RunStateSnapshot,
@@ -104,6 +105,28 @@ def test_run_finished_serializes_terminal_record():
     assert record["step"] == 2
     assert record["total_steps"] == 2
     assert record["modified_files"] == ["b.py", "a.py"]
+    json.dumps(record)
+
+
+def test_run_cancelled_serializes_terminal_record():
+    record = event_to_record(RunCancelled(
+        run_id="r",
+        sequence=3,
+        session_id="s",
+        final_state=RunStateSnapshot(
+            status="CANCELLED",
+            reason="cancelled",
+            summary="stopped safely",
+            steps=2,
+            total_tokens=9,
+        ),
+    ))
+    assert record["event_type"] == "run_cancelled"
+    assert record["type"] == "cancelled"
+    assert record["status"] == "CANCELLED"
+    assert record["reason"] == "cancelled"
+    assert record["summary"] == "stopped safely"
+    assert record["step"] == 2
     json.dumps(record)
 
 

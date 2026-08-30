@@ -10,6 +10,7 @@ from coding_agent.events import (
     ModelCompleted,
     ModelResponseSnapshot,
     ModelStarted,
+    RunCancelled,
     RunFailed,
     RunFinished,
     RunStarted,
@@ -365,6 +366,19 @@ def test_run_failed_marks_running_tools_as_error():
     assert a1.status is ToolUiStatus.ERROR
     assert a1.error == "core boom"
     assert a2.status is ToolUiStatus.ERROR
+
+
+def test_run_cancelled_marks_terminal_without_error():
+    state = reduce_event(initial_ui_state(), _started("run-1", sequence=1))
+    state = reduce_event(state, RunCancelled(
+        run_id="run-1",
+        sequence=2,
+        final_state=RunStateSnapshot(status="CANCELLED", reason="cancelled", steps=2),
+    ))
+    assert state.terminal
+    assert state.phase == "cancelled"
+    assert state.terminal_status == "CANCELLED"
+    assert state.terminal_error == ""
 
 
 def test_assistant_reply_is_terminal_and_preserves_text():

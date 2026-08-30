@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from textual.widgets import Input
 
+from coding_agent.agent.cancellation import CancellationToken
 from coding_agent.agent.loop import AgentRunResult
 from coding_agent.events import (
     AgentEvent,
@@ -14,6 +15,7 @@ from coding_agent.events import (
     FinishAccepted,
     ModelCompleted,
     ModelResponseSnapshot,
+    RunCancelled,
     RunFailed,
     RunFinished,
     RunStarted,
@@ -186,6 +188,46 @@ async def test_assistant_reply_renders_and_reenables_input(tmp_path: Path) -> No
         )))
         await pilot.pause()
         assert not app.query_one(Input).disabled
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_cancels_active_worker_then_exits_when_cancelling(tmp_path: Path) -> None:
+    app = CodingAgentApp(workspace=tmp_path)
+    token = CancellationToken()
+
+    class WorkerStub:
+        cancellation_token = token
+        is_alive = True
+
+        def cancel(self) -> bool:
+            return token.cancel()
+
+    async with app.run_test() as pilot:
+        app._worker = WorkerStub()  # type: ignore[assignment]
+        app.query_one(Input).disabled = True
+        await pilot.press("ctrl+c")
+        assert token.is_cancelled
+        assert "cancelling" in str(app.query_one("#run_status").render())
+        assert app.query_one(Input).disabled
+        await pilot.press("ctrl+c")
+        assert app.return_value is None
+
+
+    app = CodingAgentApp(workspace=tmp_path)
+    async with app.run_test() as pilot:
+        await _post(app, pilot, RunStarted(run_id="run-1", sequence=1))
+        await _post(app, pilot, RunCancelled(
+            run_id="run-1",
+            sequence=2,
+            final_state=RunStateSnapshot(
+                status="CANCELLED", reason="cancelled", summary="stopped", steps=1
+            ),
+        ))
+        final = app.query_one(FinalResultWidget)
+        assert "cancelled" in final.classes
+        assert "error" not in final.classes
+        assert "cancelled" in str(app.query_one("#run_status").render())
         await pilot.pause()
 
 

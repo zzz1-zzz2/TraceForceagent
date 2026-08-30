@@ -211,6 +211,14 @@ def test_agent_worker_propagates_uncaught_exception(monkeypatch, tmp_path: Path)
     assert isinstance(errors[0].error, RuntimeError)
 
 
+def test_agent_worker_cancel_is_idempotent(tmp_path: Path):
+    config = AgentConfig(workspace_root=tmp_path, trace_root=tmp_path / "trace")
+    app = _MessageCollectingApp()
+    worker = AgentWorker(app, task="t", workspace=tmp_path, config=config)
+    assert worker.cancel() is True
+    assert worker.cancel() is False
+
+
 def test_agent_worker_refuses_double_start(tmp_path: Path):
     config = AgentConfig(workspace_root=tmp_path, trace_root=tmp_path / "trace")
     app = _MessageCollectingApp()

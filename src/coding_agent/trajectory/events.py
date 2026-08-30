@@ -93,6 +93,12 @@ def event_to_record(event: AgentEvent) -> dict[str, Any]:
         payload["step"] = final.get("steps", 0)
         payload["error_msg"] = payload.get("error", "")
         payload.update(_legacy_terminal_fields(final))
+    elif event_type == "run_cancelled":
+        payload.setdefault("session_id", "")
+        final = payload.pop("final_state", {}) or {}
+        payload["type"] = "cancelled"
+        payload["step"] = final.get("steps", 0)
+        payload.update(_legacy_terminal_fields(final))
     elif event_type == "feedback_recorded":
         payload["type"] = "feedback"
     elif event_type == "validation_completed":

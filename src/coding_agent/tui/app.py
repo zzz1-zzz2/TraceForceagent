@@ -17,6 +17,7 @@ from coding_agent.events import (
     FinishAccepted,
     ModelCompleted,
     ModelFailed,
+    RunCancelled,
     RunFailed,
     RunFinished,
     RunStarted,
@@ -52,7 +53,7 @@ class CodingAgentApp(App):
 
     CSS_PATH = "tui.css"
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
+        ("ctrl+c", "quit_or_cancel", "Cancel / quit"),
         ("ctrl+l", "clear_log", "Clear"),
         ("ctrl+o", "toggle_tools", "Expand/collapse tools"),
     ]
@@ -347,6 +348,13 @@ class CodingAgentApp(App):
                 if tool_widget is not None:
                     tool_widget.apply_state(tool_state)
             await self._update_final(event.run_id)
+        elif isinstance(event, RunCancelled):
+            for tool_key, tool_state in self._ui_state.tools.items():
+                tool_widget = self._tool_widgets.get(tool_key)
+                if tool_widget is not None:
+                    tool_widget.apply_state(tool_state)
+            await self._update_final(event.run_id)
+
         elif isinstance(event, (TurnStarted, TurnEnded)):
             return
 
@@ -395,6 +403,17 @@ class CodingAgentApp(App):
         input_widget = self.query_one("#input", Input)
         input_widget.disabled = False
         input_widget.focus()
+
+    def action_quit_or_cancel(self) -> None:
+        """Cancel an active run once; quit if idle or already cancelling."""
+        if self._worker is None or not self._worker.is_alive:
+            self.exit()
+            return
+        if self._worker.cancellation_token.is_cancelled:
+            self.exit()
+            return
+        if self._worker.cancel():
+            self._status().update("• cancelling…")
 
     def action_clear_log(self) -> None:
         """Clear the component transcript, preserving the composer."""

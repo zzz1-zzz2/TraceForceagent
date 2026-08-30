@@ -299,6 +299,24 @@ class AgentSession:
             error=error_text,
         )
 
+    def cancel_run(
+        self,
+        run_id: str | SessionRun,
+        result: Any = None,
+        *,
+        snapshot: PreviousRunSnapshot | None = None,
+        reason: str = "cancelled",
+    ) -> PreviousRunSnapshot:
+        """Commit a cancelled terminal fact, then release the active guard."""
+        return self._finish_run(
+            run_id,
+            result,
+            snapshot=snapshot,
+            outcome="cancelled",
+            reason=reason,
+            error="",
+        )
+
     def _finish_run(
         self,
         run_id: str | SessionRun,

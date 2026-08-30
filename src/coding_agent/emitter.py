@@ -21,6 +21,7 @@ _PERSIST_FIRST_EVENT_TYPES = frozenset({
     "validation_completed",
     "run_finished",
     "run_failed",
+    "run_cancelled",
 })
 
 

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from coding_agent.agent.brief import TaskBrief, TaskMode
+from coding_agent.agent.cancellation import CancellationRequested, CancellationToken
 from coding_agent.agent.finish_policy import FinishPolicy, classify_validation
 from coding_agent.agent.state import AgentState
 from coding_agent.agent.termination import TerminationConfig, TerminationController
@@ -23,6 +24,7 @@ from coding_agent.events import (
     ModelFailed,
     ModelResponseSnapshot,
     ModelStarted,
+    RunCancelled,
     RunFailed,
     RunFinished,
     RunStarted,
@@ -72,6 +74,14 @@ class _LoopFailure(Exception):
         self.final_state = final_state
 
 
+class _LoopCancelled(Exception):
+    """Carry a cancelled run's final state to the outer coordinator."""
+
+    def __init__(self, final_state: RunStateSnapshot) -> None:
+        super().__init__("agent run cancelled")
+        self.final_state = final_state
+
+
 def _snapshot(state: AgentState, *, reason: str = "") -> RunStateSnapshot:
     """Build an immutable terminal view without exposing AgentState containers."""
     return RunStateSnapshot(
@@ -97,6 +107,7 @@ def run(
     task_mode: TaskMode | str | None = None,
     trajectory_sink: TrajectoryEventSink | None = None,
     session: AgentSession | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> AgentRunResult:
     """Run one turn, optionally recording it in an :class:`AgentSession`."""
     events = emitter or EventEmitter()
@@ -132,6 +143,27 @@ def run(
                 run_id=run_id,
                 session_id=active_session.session_id,
                 session=active_session,
+                cancellation_token=cancellation_token,
+            )
+        except _LoopCancelled as cancelled:
+            _finalize_cancelled_run(
+                active_session,
+                session_run,
+                cancelled.final_state,
+                events,
+                run_id,
+            )
+            return AgentRunResult(
+                summary=cancelled.final_state.summary,
+                validation=cancelled.final_state.validation,
+                stop_reason="cancelled",
+                steps=cancelled.final_state.steps,
+                total_tokens=cancelled.final_state.total_tokens,
+                duration=time.time() - getattr(session_run, "started_at", time.time()),
+                trajectory_path=trajectory_path,
+                modified_files=cancelled.final_state.modified_files,
+                findings=cancelled.final_state.findings,
+                final_state=cancelled.final_state,
             )
         except _LoopFailure as failure:
             _finalize_failed_run(
@@ -216,6 +248,48 @@ def run(
             trajectory_sink.close()
 
 
+def _finalize_cancelled_run(
+    session: AgentSession,
+    session_run: Any,
+    final_state: RunStateSnapshot,
+    events: EventEmitter,
+    run_id: str,
+) -> None:
+    """Persist cancellation before exposing the matching terminal event."""
+    committed = session.cancel_run(
+        session_run,
+        snapshot=PreviousRunSnapshot(
+            run_id=run_id,
+            outcome="cancelled",
+            reason="cancelled",
+            summary=final_state.summary,
+            validation=final_state.validation,
+            notes=final_state.notes,
+            validation_skipped_reason=final_state.validation_skipped_reason,
+            modified_files=final_state.modified_files,
+            findings=final_state.findings,
+            steps=final_state.steps,
+            total_tokens=final_state.total_tokens,
+            status="CANCELLED",
+        ),
+    )
+    events.emit(RunCancelled(
+        run_id=run_id,
+        session_id=session.session_id,
+        final_state=RunStateSnapshot(
+            status=committed.status or "CANCELLED",
+            reason=committed.reason or "cancelled",
+            summary=committed.summary,
+            validation=committed.validation,
+            notes=committed.notes,
+            validation_skipped_reason=committed.validation_skipped_reason,
+            steps=committed.steps,
+            total_tokens=committed.total_tokens,
+            modified_files=committed.modified_files,
+            findings=committed.findings,
+        ),
+    ))
+
 def _finalize_failed_run(
     session: AgentSession,
     session_run: Any,
@@ -280,10 +354,12 @@ def _run_loop(
     run_id: str | None = None,
     session_id: str = "",
     session: AgentSession | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> AgentRunResult:
     """Execute the AgentLoop; all observability is emitted as typed events."""
     start = time.time()
     run_id = run_id or f"run_{int(start)}_{uuid.uuid4().hex[:6]}"
+    token = cancellation_token or CancellationToken()
     turn_number = 0
     active_turn: int | None = None
     active_model = False
@@ -321,6 +397,7 @@ def _run_loop(
 
     try:
         while True:
+            token.raise_if_cancelled()
             should_stop, stop_reason, _ = termination.should_stop(state)
             if should_stop:
                 if stop_reason is None:
@@ -338,6 +415,7 @@ def _run_loop(
             active_turn = turn_number
             events.emit(TurnStarted(run_id=run_id, turn=turn_number))
             try:
+                token.raise_if_cancelled()
                 messages = context_manager.build(
                     state,
                     brief,
@@ -355,6 +433,7 @@ def _run_loop(
                 messages.append({"role": "user", "content": f"[System Feedback] {repeat_feedback}"})
 
             model_name = getattr(model_client, "model", "")
+            token.raise_if_cancelled()
             active_model = True
             events.emit(ModelStarted(
                 run_id=run_id,
@@ -388,7 +467,9 @@ def _run_loop(
                 model=model_name,
                 response=ModelResponseSnapshot.from_response(response),
             ))
+            token.raise_if_cancelled()
             action = parser.parse(response)
+            token.raise_if_cancelled()
 
             if isinstance(action, AssistantReplyAction):
                 if state.last_mutation_step > 0:
@@ -438,6 +519,7 @@ def _run_loop(
                     continue
 
                 state.mark_finished(action.summary, action.validation, action.validation_skipped_reason, action.notes)
+                token.raise_if_cancelled()
                 events.emit(FinishAccepted(
                     run_id=run_id,
                     turn=turn_number,
@@ -486,6 +568,7 @@ def _run_loop(
                 continue
 
             tool_step = state.step_count
+            token.raise_if_cancelled()
             active_tool = (action, None, tool_step)
             if session is not None:
                 session.record_tool_call(
@@ -610,6 +693,7 @@ def _run_loop(
                 ))
 
             active_tool = None
+            token.raise_if_cancelled()
             if action.tool_name == "run_command":
                 command = str(action.arguments.get("command", ""))
                 verdict = classify_validation(observation, command)
@@ -634,6 +718,44 @@ def _run_loop(
             end_turn(turn_number, "completed")
 
     except Exception as exc:
+        if isinstance(exc, CancellationRequested):
+            if active_tool is not None:
+                active_action = active_tool[0]
+                active_observation = active_tool[1]
+                active_tool_step = active_tool[2]
+                active_tool = None
+                if session is not None and active_observation is not None:
+                    session.record_tool_result(
+                        tool_call_id=active_action.action_id,
+                        tool_name=active_action.tool_name,
+                        content=active_observation.content,
+                        success=active_observation.success,
+                        error=active_observation.error,
+                        run_id=run_id,
+                    )
+                try:
+                    events.emit(ToolCompleted(
+                        run_id=run_id,
+                        turn=turn_number,
+                        step=active_tool_step,
+                        tool_name=active_action.tool_name,
+                        action_id=active_action.action_id,
+                        arguments=active_action.arguments,
+                        args_hash=active_action.args_hash,
+                        result=ToolResultSnapshot.from_result(active_observation)
+                        if active_observation else None,
+                    ))
+                except Exception:
+                    pass
+            if active_model:
+                active_model = False
+            if active_turn is not None:
+                try:
+                    events.emit(TurnEnded(run_id=run_id, turn=active_turn, status="cancelled"))
+                except Exception:
+                    pass
+            state.mark_cancelled()
+            raise _LoopCancelled(_snapshot(state, reason="cancelled")) from exc
         if active_model:
             active_model = False
             try:
@@ -649,7 +771,7 @@ def _run_loop(
                 pass
         if active_tool is not None:
             active_action = active_tool[0]
-            active_observation: ToolResult | None = active_tool[1]
+            active_observation = active_tool[1]
             active_tool_step = active_tool[2]
             active_tool = None
             try:

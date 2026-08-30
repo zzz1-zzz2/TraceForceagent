@@ -26,6 +26,7 @@ class StopReason(str, Enum):  # noqa: UP042 - preserve the public enum type
     MAX_CONSECUTIVE_TIMEOUTS = "max_consecutive_timeouts"
     REPEATED_ACTION = "repeated_action"
     STAGNATION = "stagnation"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -290,3 +291,8 @@ class AgentState:
         """标记为保护性终止。"""
         self.status = "STOPPED"
         self.stop_reason = reason
+
+    def mark_cancelled(self) -> None:
+        """Mark the run as cooperatively cancelled."""
+        self.status = "CANCELLED"
+        self.stop_reason = StopReason.CANCELLED
